@@ -40,3 +40,7 @@ frontend/out/
 # 根目录 Node
 node_modules/
 .next/
+
+# RAG 知识库持久化数据
+data/
+rag/chroma/

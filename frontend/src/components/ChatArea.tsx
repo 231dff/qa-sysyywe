@@ -38,9 +38,9 @@ export default function ChatArea() {
     <div className="flex-1 flex flex-col h-screen bg-gray-50">
       {/* 状态栏 */}
       {sse.progressMessage && isBusy && (
-        <div className="bg-blue-50 border-b border-blue-100 px-4 py-2">
-          <p className="text-xs text-blue-600 flex items-center gap-2">
-            <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+        <div className="bg-gray-100 border-b border-gray-200 px-4 py-2">
+          <p className="text-xs text-gray-600 flex items-center gap-2">
+            <span className="inline-block w-2.5 h-2.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
             {sse.progressMessage}
           </p>
         </div>
@@ -51,9 +51,8 @@ export default function ChatArea() {
         <div className="max-w-3xl mx-auto">
           {displayMessages.length === 0 && !isBusy && (
             <div className="text-center text-gray-400 mt-20">
-              <p className="text-4xl mb-4">🔍</p>
-              <p className="text-lg font-medium">智能搜索助手</p>
-              <p className="text-sm">实时联网搜索 · 可信答案生成 · 多轮对话理解</p>
+              <p className="text-lg font-medium text-gray-700">智能搜索助手</p>
+              <p className="text-sm">输入问题开始检索</p>
             </div>
           )}
           {displayMessages.map((msg) => (

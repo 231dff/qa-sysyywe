@@ -209,6 +209,18 @@ async def rewrite_query(
 
     start = time.perf_counter()
     try:
+        # DeepSeek 等 provider 不支持 response_format，需按平台能力降级
+        request_body = {
+            "model": api_cfg.llm_model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        }
+        if api_cfg.supports_response_format:
+            request_body["response_format"] = {"type": "json_object"}
+
         async with get_http_client(timeout=30.0) as client:
             resp = await client.post(
                 f"{api_cfg.llm_api_base}/chat/completions",
@@ -216,15 +228,7 @@ async def rewrite_query(
                     "Authorization": f"Bearer {api_cfg.llm_api_key.get_secret_value()}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": api_cfg.llm_model,
-                    "temperature": 0.1,
-                    "messages": [
-                        {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "response_format": {"type": "json_object"},
-                },
+                json=request_body,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -321,6 +325,17 @@ async def score_relevance(
 请为每条结果打分:"""
 
     try:
+        request_body = {
+            "model": api_cfg.llm_model,
+            "temperature": 0.0,
+            "messages": [
+                {"role": "system", "content": RELEVANCE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        }
+        if api_cfg.supports_response_format:
+            request_body["response_format"] = {"type": "json_object"}
+
         async with get_http_client(timeout=30.0) as client:
             resp = await client.post(
                 f"{api_cfg.llm_api_base}/chat/completions",
@@ -328,15 +343,7 @@ async def score_relevance(
                     "Authorization": f"Bearer {api_cfg.llm_api_key.get_secret_value()}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": api_cfg.llm_model,
-                    "temperature": 0.0,
-                    "messages": [
-                        {"role": "system", "content": RELEVANCE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "response_format": {"type": "json_object"},
-                },
+                json=request_body,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -446,6 +453,8 @@ async def search_and_filter_pipeline(
     query: str,
     deduplicator: Optional[URLDeduplicator] = None,
     use_llm_scoring: bool = False,
+    search_depth: Optional[str] = None,
+    max_results: Optional[int] = None,
 ) -> tuple[list[SearchResult], list[tuple[str, str, float]]]:
     """
     完整的搜索+过滤流水线:
@@ -461,7 +470,11 @@ async def search_and_filter_pipeline(
         deduplicator = URLDeduplicator(window_size=agent_cfg.dedup_window)
 
     # Step 1: 搜索
-    search_resp = await tavily_search(query)
+    search_resp = await tavily_search(
+        query,
+        max_results=max_results,
+        search_depth=search_depth,
+    )
     if search_resp.error:
         if agent_cfg.verbose:
             print(f"[搜索异常] {search_resp.error}")

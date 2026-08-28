@@ -19,6 +19,8 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+    volumes:
+      - kb_data:/app/data
     networks:
       - search-network
     healthcheck:
@@ -103,4 +105,6 @@ volumes:
   prometheus_data:
     driver: local
   grafana_data:
+    driver: local
+  kb_data:
     driver: local

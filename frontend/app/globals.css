@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f7f8fa;
+  --foreground: #1a1d21;
 }
 
 @theme inline {
@@ -15,38 +15,29 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+  font-family: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
 }
 
-/* 滚动条样式 */
+/* 滚动条样式 — 低调 */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 3px;
+  background: #d5d8dd;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: #b6bac1;
 }
 
-/* 流式光标动画 */
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-.animate-blink {
-  animation: blink 0.6s infinite;
-}
-
-/* Markdown 内容渲染样式 */
+/* Markdown 内容渲染样式 — 专业排版 */
 .markdown-body {
-  font-size: 0.875rem;
-  line-height: 1.65;
-  color: #1f2937;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  color: #2a2e35;
 }
 
 .markdown-body h1,
@@ -57,11 +48,12 @@ body {
   line-height: 1.35;
   margin-top: 1em;
   margin-bottom: 0.4em;
+  color: #1a1d21;
 }
 
-.markdown-body h1 { font-size: 1.25rem; }
-.markdown-body h2 { font-size: 1.1rem; }
-.markdown-body h3 { font-size: 1rem; }
+.markdown-body h1 { font-size: 1.2rem; }
+.markdown-body h2 { font-size: 1.08rem; }
+.markdown-body h3 { font-size: 0.98rem; }
 
 .markdown-body p {
   margin-bottom: 0.5em;
@@ -78,16 +70,16 @@ body {
 }
 
 .markdown-body li::marker {
-  color: #6b7280;
+  color: #9aa0a8;
 }
 
 .markdown-body strong {
   font-weight: 600;
-  color: #111827;
+  color: #111418;
 }
 
 .markdown-body code {
-  background: #f3f4f6;
+  background: #eef0f3;
   padding: 0.15em 0.4em;
   border-radius: 3px;
   font-size: 0.85em;
@@ -95,9 +87,9 @@ body {
 }
 
 .markdown-body pre {
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  background: #f3f4f6;
+  border: 1px solid #e4e6ea;
+  border-radius: 4px;
   padding: 0.75em 1em;
   overflow-x: auto;
   margin-bottom: 0.75em;
@@ -109,14 +101,14 @@ body {
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid #d1d5db;
+  border-left: 3px solid #d5d8dd;
   padding-left: 0.75em;
   margin-left: 0;
   color: #6b7280;
 }
 
 .markdown-body a {
-  color: #2563eb;
+  color: #1f4e8c;
   text-decoration: none;
 }
 
@@ -126,25 +118,25 @@ body {
 
 .markdown-body hr {
   border: none;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid #e4e6ea;
   margin: 1em 0;
 }
 
 .markdown-body table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
 }
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid #e5e7eb;
+  border: 1px solid #e4e6ea;
   padding: 0.4em 0.6em;
   text-align: left;
 }
 
 .markdown-body th {
-  background: #f9fafb;
+  background: #f3f4f6;
   font-weight: 600;
 }
 

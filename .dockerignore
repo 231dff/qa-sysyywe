@@ -32,7 +32,20 @@ htmlcov/
 # 工作树
 .claude/
 
-# Next.js 前端
+# 根目录 Node（非前端构建所需，避免打入后端镜像）
+node_modules/
+.next/
+
+# RAG 知识库持久化数据（运行时再生成，不应进镜像）
+data/
+rag/chroma/
+
+# 评估产物
+evals/report.html
+evals/report.json
+evals/benchmark.html
+
+# Next.js 前端（仅排除前端自身的依赖与构建产物；前端源码需保留给 Dockerfile.frontend）
 frontend/node_modules/
 frontend/.next/
 frontend/out/

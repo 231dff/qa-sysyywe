@@ -49,12 +49,12 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
           placeholder="输入你的问题，例如：今天有什么重大新闻？"
           disabled={disabled}
           rows={1}
-          className="flex-1 border border-gray-300 rounded-xl px-4 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
+          className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-gray-400 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
         />
         <button
           onClick={handleSubmit}
           disabled={disabled || !value.trim()}
-          className="px-5 py-2.5 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+          className="px-5 py-2.5 bg-gray-900 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
         >
           {disabled ? "..." : "发送"}
         </button>

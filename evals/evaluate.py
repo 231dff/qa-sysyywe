@@ -28,9 +28,10 @@ import httpx
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.graph import SearchAgent, route_after_generate, route_after_search
+from agent.graph import SearchAgent
 from agent.models import AgentState, GeneratedAnswer, RelevanceScores, RewrittenQuery, SearchResponse, SearchResult
 from config import get_agent_config
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tools.registry import generate_fallback_answer, rewrite_query, score_relevance, search_and_filter_pipeline, tavily_search
 
 
@@ -195,9 +196,7 @@ class Runner:
 
         start = time.perf_counter()
 
-        if cat == "routing":
-            facts = self._run_routing(ctx)
-        elif cat == "tool_behavior":
+        if cat == "tool_behavior":
             facts = await self._run_tool(case)
         elif cat == "state_integrity":
             facts = self._run_state(ctx)
@@ -205,21 +204,74 @@ class Runner:
             facts = await self._run_multi(case)
         elif cat == "edge_case":
             facts = await self._run_edge(case)
+        elif cat == "guardrails":
+            facts = self._run_guard(case)
+        elif cat == "rag":
+            facts = self._run_rag(case)
+        elif cat == "provider":
+            facts = self._run_provider(case)
         elif ctx.get("search_returns_empty"):
             facts = await self._run_search_fail(case)
         elif ctx.get("llm_answer_raises_exception"):
             facts = await self._run_answer_fail(case)
-        elif ctx.get("rewrite_raises_exception"):
-            facts = await self._run_rewrite_fail(case)
-        elif ctx.get("scoring_raises_exception"):
-            facts = await self._run_score_fail(case)
-        elif ctx.get("search_raises_timeout"):
-            facts = await self._run_timeout(case)
         else:
             facts = await self._run_happy(case)
 
         elapsed = (time.perf_counter() - start) * 1000
         return facts, elapsed
+
+    # ── FakeGraph 注入（ReAct 轨迹驱动） ──
+    @staticmethod
+    def _make_search_tool_message(summary="搜索结果", sources=None):
+        payload = {"summary": summary, "sources": sources or []}
+        return ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False),
+            tool_call_id="call-1",
+            name="search",
+        )
+
+    @staticmethod
+    def _install_fake_graph(agent, messages_factory):
+        """替换 ReactAgent._graph 的 ainvoke，返回预设消息轨迹"""
+        async def fake_ainvoke(inputs, config=None):
+            query = inputs["messages"][-1].content
+            return {"messages": messages_factory(query)}
+        agent._react._graph = MagicMock()
+        agent._react._graph.ainvoke = fake_ainvoke
+        return agent
+
+    @staticmethod
+    def _happy_messages(query, answer=ANSWER_OUT):
+        """question → tool_call → tool_result → answer"""
+        return [
+            HumanMessage(content=query),
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {"query": "测试"}, "id": "c1"}]),
+            Runner._make_search_tool_message(
+                "结果", [{"url": "https://example.com/1", "title": "", "snippet": "内容"}]
+            ),
+            AIMessage(content=answer),
+        ]
+
+    @staticmethod
+    def _fallback_messages(query):
+        """question → (空 answer，触发降级)"""
+        return [HumanMessage(content=query)]
+
+    @staticmethod
+    def _install_fake_fallback(agent):
+        """替换 ReactAgent._fallback，避免降级时走真实 httpx"""
+        async def fake_fallback(query, history, start, confidence=0.5, error=None):
+            return GeneratedAnswer(
+                query=query,
+                answer="⚠️ 当前无法进行实时搜索，以下回答基于训练数据。",
+                sources=[],
+                confidence=confidence,
+                is_fallback=True,
+                tokens_used=5,
+                latency_ms=0.0,
+            )
+        agent._react._fallback = fake_fallback
+        return agent
 
     # ── Mock 客户端工厂 ──
     def _make_mock_client(self, handler):
@@ -244,13 +296,18 @@ class Runner:
                 yield m
 
             # 需要 patch 所有 import 位置 — from X import Y 创建了本地绑定
+            # 仅 patch 仍存在的模块属性（ReAct 后 graph.py 不再持有 get_http_client）
             for target in [
                 "tools.registry.get_http_client",
+                "agent.react.get_http_client",
                 "agent.graph.get_http_client",
             ]:
-                p = patch(target, side_effect=_mock_get_http_client)
-                p.start()
-                self._patches.append(p)
+                try:
+                    p = patch(target, side_effect=_mock_get_http_client)
+                    p.start()
+                    self._patches.append(p)
+                except AttributeError:
+                    pass
 
             return self
 
@@ -275,46 +332,14 @@ class Runner:
     # ── Happy Path ──
     async def _run_happy(self, case: dict) -> dict:
         query = case.get("query", "")
-        nodes = []
-        agent = SearchAgent()
-
-        def rewrite_fn():
-            nodes.append("rewrite_query")
-            return _mock_resp(_llm(COMPARE_OUT if ("对比" in query or "哪个更" in query) else REWRITE_OUT))
-        def score_fn():
-            nodes.append("score_relevance")
-            return _mock_resp(_llm(SCORE_OUT))
-        def answer_fn():
-            nodes.append("generate_answer")
-            return _mock_resp(_llm(ANSWER_OUT))
-        def search_fn():
-            nodes.append("search")
-            return _mock_resp(_tavily())
-
-        behaviors = {
-            "搜索查询优化专家": rewrite_fn,
-            "搜索结果质量评估专家": score_fn,
-            "实时信息问答助手": answer_fn,
-            "智能问答助手": answer_fn,
-        }
-        # 搜索用 fallthrough 处理
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            for frag, fn in behaviors.items():
-                if frag in sys:
-                    return fn()
-            return search_fn()
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
+        agent = self._install_fake_graph(
+            SearchAgent(), lambda q: self._happy_messages(q)
+        )
+        result = await agent.run(query)
 
         all_sessions = list(agent._sessions.keys())
         hist = agent.get_history(all_sessions[0]) if all_sessions else []
         return {
-            "nodes_called": nodes,
             "is_fallback": result.is_fallback,
             "confidence": result.confidence,
             "sources_non_empty": len(result.sources) > 0,
@@ -322,37 +347,20 @@ class Runner:
             "answer_non_empty": len(result.answer) > 0,
             "latency_ms_gt": result.latency_ms > 0,
             "tokens_used_gte": result.tokens_used >= 0,
-            "search_failed": False,
-            "error_is_none": True,
             "history_count_gte": len(hist),
             "rewritten_non_empty": True,
         }
 
-    # ── 搜索失败 ──
+    # ── 搜索失败 → 降级 ──
     async def _run_search_fail(self, case: dict) -> dict:
         query = case.get("query", "")
-        nodes = []
-        agent = SearchAgent()
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                nodes.append("rewrite_query")
-                return _mock_resp(_llm(REWRITE_OUT))
-            elif "智能问答助手" in sys or "实时信息问答助手" in sys:
-                nodes.append("generate_answer")
-                return _mock_resp(_llm(FALLBACK_OUT))
-            else:
-                nodes.append("search")
-                return _mock_resp({"results": []})
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
+        agent = self._install_fake_graph(
+            SearchAgent(), lambda q: self._fallback_messages(q)
+        )
+        self._install_fake_fallback(agent)
+        result = await agent.run(query)
 
         return {
-            "nodes_called": nodes,
             "is_fallback": result.is_fallback,
             "confidence": result.confidence,
             "sources_empty": len(result.sources) == 0,
@@ -360,150 +368,21 @@ class Runner:
             "answer_has_fallback_marker": "⚠️" in result.answer,
         }
 
-    # ── 答案生成失败 ──
+    # ── 答案生成失败 → 二次降级 ──
     async def _run_answer_fail(self, case: dict) -> dict:
         query = case.get("query", "")
-        nodes = []
         agent = SearchAgent()
-        answer_call = [0]
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                nodes.append("rewrite_query")
-                return _mock_resp(_llm(REWRITE_OUT))
-            elif "搜索结果质量评估专家" in sys:
-                return _mock_resp(_llm(SCORE_OUT))
-            elif "实时信息问答助手" in sys:
-                nodes.append("generate_answer")
-                raise Exception("LLM API 500")
-            elif "智能问答助手" in sys:
-                nodes.append("generate_answer")
-                return _mock_resp(_llm(FALLBACK_OUT))
-            else:
-                nodes.append("search")
-                return _mock_resp(_tavily())
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
+        agent._react._graph = MagicMock()
+        agent._react._graph.ainvoke = AsyncMock(side_effect=RuntimeError("LLM API 500"))
+        self._install_fake_fallback(agent)
+        result = await agent.run(query)
 
         return {
-            "nodes_called": nodes,
             "is_fallback": result.is_fallback,
             "confidence": result.confidence,
             "sources_empty": len(result.sources) == 0,
             "answer_non_empty": len(result.answer) > 0,
         }
-
-    # ── 改写失败 ──
-    async def _run_rewrite_fail(self, case: dict) -> dict:
-        query = case.get("query", "")
-        nodes = []
-        agent = SearchAgent()
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                nodes.append("rewrite_query")
-                raise Exception("rewrite unavailable")
-            elif "搜索结果质量评估专家" in sys:
-                return _mock_resp(_llm(SCORE_OUT))
-            elif "实时信息问答助手" in sys:
-                nodes.append("generate_answer")
-                return _mock_resp(_llm(ANSWER_OUT))
-            else:
-                nodes.append("search")
-                return _mock_resp(_tavily())
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
-
-        return {
-            "nodes_called": nodes,
-            "is_fallback": result.is_fallback,
-            "answer_non_empty": len(result.answer) > 0,
-        }
-
-    # ── 打分失败 ──
-    async def _run_score_fail(self, case: dict) -> dict:
-        query = case.get("query", "")
-        nodes = []
-        agent = SearchAgent()
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                nodes.append("rewrite_query")
-                return _mock_resp(_llm(REWRITE_OUT))
-            elif "搜索结果质量评估专家" in sys:
-                raise Exception("scoring unavailable")
-            elif "实时信息问答助手" in sys:
-                nodes.append("generate_answer")
-                return _mock_resp(_llm(ANSWER_OUT))
-            else:
-                nodes.append("search")
-                return _mock_resp(_tavily())
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
-
-        return {
-            "nodes_called": nodes,
-            "is_fallback": result.is_fallback,
-            "sources_non_empty": len(result.sources) > 0,
-        }
-
-    # ── 搜索超时 ──
-    async def _run_timeout(self, case: dict) -> dict:
-        query = case.get("query", "")
-        nodes = []
-        agent = SearchAgent()
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                nodes.append("rewrite_query")
-                return _mock_resp(_llm(REWRITE_OUT))
-            elif "智能问答助手" in sys or "实时信息问答助手" in sys:
-                nodes.append("generate_answer")
-                return _mock_resp(_llm(FALLBACK_OUT))
-            else:
-                nodes.append("search")
-                raise httpx.TimeoutException("Request timed out")
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
-
-        return {
-            "nodes_called": nodes,
-            "is_fallback": result.is_fallback,
-            "confidence": result.confidence,
-            "answer_non_empty": len(result.answer) > 0,
-        }
-
-    # ── 路由测试 ──
-    def _run_routing(self, ctx: dict) -> dict:
-        rt = ctx.get("route_test", "")
-        facts = {}
-        if rt == "after_search_success":
-            facts["route_after_search"] = route_after_search({"search_failed": False})
-        elif rt == "after_search_failure":
-            facts["route_after_search"] = route_after_search({"search_failed": True})
-        elif rt == "after_generate_success":
-            facts["route_after_generate"] = route_after_generate({"error": None})
-        elif rt == "after_generate_failure":
-            facts["route_after_generate"] = route_after_generate({"error": "err"})
-        elif rt == "after_search_missing_key":
-            facts["route_after_search"] = route_after_search({})
-        return facts
 
     # ── 工具行为 ──
     async def _run_tool(self, case: dict) -> dict:
@@ -626,18 +505,7 @@ class Runner:
         agent = SearchAgent()
         rounds = []
 
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                return _mock_resp(_llm(REWRITE_OUT))
-            elif "搜索结果质量评估专家" in sys:
-                return _mock_resp(_llm(SCORE_OUT))
-            elif "实时信息问答助手" in sys:
-                return _mock_resp(_llm(ANSWER_OUT))
-            else:
-                return _mock_resp(_tavily())
+        agent = self._install_fake_graph(agent, lambda q: self._happy_messages(q))
 
         orig_turns = None
         if max_turns is not None:
@@ -645,15 +513,14 @@ class Runner:
             self.cfg.max_history_turns = max_turns
 
         try:
-            with self._make_mock_client(handler):
-                for i, q in enumerate(queries):
-                    r = await agent.run(q, session_id=sid)
-                    rounds.append({"round": i+1, "is_fallback": r.is_fallback})
+            for i, q in enumerate(queries):
+                r = await agent.run(q, session_id=sid)
+                rounds.append({"round": i+1, "is_fallback": r.is_fallback})
 
-                if clear_after:
-                    agent.clear_session(sid)
+            if clear_after:
+                agent.clear_session(sid)
 
-                hist = agent.get_history(sid)
+            hist = agent.get_history(sid)
         finally:
             if orig_turns is not None:
                 self.cfg.max_history_turns = orig_turns
@@ -670,30 +537,80 @@ class Runner:
     # ── 边缘情况 ──
     async def _run_edge(self, case: dict) -> dict:
         query = case.get("query", "")
-        agent = SearchAgent()
-
-        async def handler(*args, **kwargs):
-            body = kwargs.get("json", {})
-            msgs = body.get("messages", [])
-            sys = msgs[0]["content"] if msgs else ""
-            if "搜索查询优化专家" in sys:
-                rw = query if query else "最新新闻"
-                return _mock_resp(_llm(f'{{"rewritten":"{rw}","language":"zh","intent":"news","sub_queries":[]}}'))
-            elif "搜索结果质量评估专家" in sys:
-                return _mock_resp(_llm(SCORE_OUT))
-            elif "实时信息问答助手" in sys:
-                return _mock_resp(_llm(ANSWER_OUT))
-            else:
-                return _mock_resp(_tavily())
-
-        with self._make_mock_client(handler):
-            result = await agent.run(query)
+        agent = self._install_fake_graph(
+            SearchAgent(), lambda q: self._happy_messages(q)
+        )
+        result = await agent.run(query)
 
         return {
             "is_fallback": result.is_fallback,
             "answer_non_empty": len(result.answer) > 0,
             "session_count_gt": len(agent._sessions) > 0,
         }
+
+    # ── 护栏 ──
+    def _run_guard(self, case: dict) -> dict:
+        from utils.guardrails import (
+            check_input_guardrails,
+            detect_prompt_injection,
+            redact_text,
+        )
+        query = case.get("query", "")
+        gt = case.get("context", {}).get("guard_test", "")
+        facts = {}
+
+        if gt == "prompt_injection":
+            injected, _ = detect_prompt_injection(query)
+            g = check_input_guardrails(query)
+            facts.update({
+                "injection_detected": injected,
+                "guard_blocks": g.blocked,
+            })
+        elif gt == "normal_query":
+            injected, _ = detect_prompt_injection(query)
+            g = check_input_guardrails(query)
+            facts.update({
+                "injection_detected": injected,
+                "guard_allows": g.safe and not g.blocked,
+            })
+        elif gt == "redaction":
+            out = redact_text(query)
+            facts.update({
+                "redaction_removes_secret": "sk-abcdef1234567890" not in out
+                    and "test@example.com" not in out,
+            })
+        return facts
+
+    # ── RAG ──
+    def _run_rag(self, case: dict) -> dict:
+        from rag import KnowledgeBase
+        query = case.get("query", "")
+        facts = {}
+
+        kb = KnowledgeBase(collection_name="eval_knowledge", in_memory=True)
+        # 幂等：若为空则写入样例
+        if kb.count() == 0:
+            kb.add_documents(
+                ["公司报销流程：员工需在每月25日前提交上月报销单据。",
+                 "项目部署规范：生产环境变更需代码评审。",
+                 "公司考勤制度：工作日 9:00-18:00。"],
+                metadatas=[{"source": "制度-报销"}, {"source": "制度-部署"}, {"source": "制度-考勤"}],
+            )
+        results = kb.search(query, top_k=3)
+        facts["rag_returns_results"] = len(results) > 0
+        if results:
+            top_source = results[0].get("metadata", {}).get("source", "")
+            facts["rag_top_result_relevant"] = "报销" in top_source
+        return facts
+
+    # ── Provider ──
+    def _run_provider(self, case: dict) -> dict:
+        from config import get_provider_preset
+        facts = {}
+        preset = get_provider_preset("deepseek")
+        facts["deepseek_no_response_format"] = preset["supports_response_format"] is False
+        facts["deepseek_no_embedding"] = preset["supports_embedding"] is False
+        return facts
 
 
 # ============================================================

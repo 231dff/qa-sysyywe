@@ -27,7 +27,7 @@ export default function StreamingToken({
     <span>
       {text}
       {showCursor && isStreaming && (
-        <span className="inline-block w-0.5 h-4 bg-blue-500 ml-0.5 animate-pulse" />
+        <span className="inline-block w-px h-4 bg-gray-400 ml-0.5" />
       )}
     </span>
   );

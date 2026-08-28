@@ -8,18 +8,18 @@ export default function SourcesPanel({ sources }: { sources: SourceInfo[] }) {
 
   return (
     <details className="mt-2">
-      <summary className="text-xs text-blue-500 cursor-pointer hover:text-blue-700">
-        📚 参考来源 ({sources.length})
+      <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+        参考来源 ({sources.length})
       </summary>
       <ul className="mt-2 space-y-1 border-t border-gray-100 pt-2">
         {sources.map((s, i) => (
           <li key={i} className="text-xs">
-            <strong>[{i + 1}]</strong>{" "}
+            <strong className="text-gray-500">[{i + 1}]</strong>{" "}
             <a
               href={s.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-500 hover:underline break-all"
+              className="text-[#1f4e8c] hover:underline break-all"
             >
               {s.title || s.url}
             </a>

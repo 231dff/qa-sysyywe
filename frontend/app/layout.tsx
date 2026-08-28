@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "智能搜索助手",
-  description: "实时联网搜索 · 可信答案生成 · 多轮对话理解",
+  description: "联网检索与知识问答",
 };
 
 export default function RootLayout({

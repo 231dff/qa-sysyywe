@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.graph import SearchAgent, node_generate_answer, node_rewrite_query, node_search
+from agent.graph import SearchAgent
 from agent.models import AgentState, GeneratedAnswer, RewrittenQuery, SearchResult
 from config import get_agent_config, get_api_config
 from tools.registry import (
@@ -173,10 +173,13 @@ class _Patcher:
         async def _mock_get_http_client(timeout=30.0):
             yield m
 
-        for target in ["tools.registry.get_http_client", "agent.graph.get_http_client"]:
-            p = patch(target, side_effect=_mock_get_http_client)
-            p.start()
-            self._patches.append(p)
+        for target in ["tools.registry.get_http_client", "agent.react.get_http_client", "agent.graph.get_http_client"]:
+            try:
+                p = patch(target, side_effect=_mock_get_http_client)
+                p.start()
+                self._patches.append(p)
+            except AttributeError:
+                pass
         return self
 
     def __exit__(self, *args):
@@ -367,7 +370,7 @@ def analyze_token_breakdown() -> list[TokenBreakdown]:
         RELEVANCE_SYSTEM_PROMPT,
         FALLBACK_SYSTEM_PROMPT,
     )
-    from agent.graph import ANSWER_SYSTEM_PROMPT
+    from agent.react import REACT_SYSTEM_PROMPT as ANSWER_SYSTEM_PROMPT
 
     results = []
 
