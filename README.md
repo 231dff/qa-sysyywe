@@ -20,9 +20,16 @@
 
 ## 🖼️ 界面预览
 
+**前端界面**（极简灰阶设计）：
+
 <p align="center">
-  <img src="screenshot-1.jpg" alt="界面预览 1" width="100%" />
-  <img src="screenshot-2.png" alt="界面预览 2" width="100%" />
+  <img src="ui-screenshot.jpg" alt="前端界面截图" width="100%" />
+</p>
+
+**Grafana 监控面板**（可用性 SLA 可视化）：
+
+<p align="center">
+  <img src="grafana-dashboard.png" alt="Grafana 监控面板" width="100%" />
 </p>
 
 
