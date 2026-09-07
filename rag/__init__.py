@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -161,9 +162,53 @@ class KnowledgeBase:
             )
 
     # ── 分块 ──
+    _SENT_END = re.compile(r"(?<=[。！？.!?])\s*")
+
+    @classmethod
+    def _split_sentences(cls, text: str) -> list[str]:
+        """按句末标点切分，保留标点（语义分块的最小单位）"""
+        parts = cls._SENT_END.split(text)
+        return [p for p in parts if p.strip()]
+
+    @classmethod
+    def _chunk_text_semantic(cls, text: str, max_unit_chars: int = 800) -> list[str]:
+        """
+        语义完整分块：按「空行段落 → 句子边界」逐级切分，绝不拦腰断句。
+        保留每个单元的语义完整性；小于阈值的文档作为单一完整单元存储。
+        仅在单句本身超限（超长无标点文本）时才硬切。
+        """
+        if not text:
+            return []
+        if len(text) <= max_unit_chars:
+            return [text]
+
+        # 第一优先级：按空行分段
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+        units: list[str] = []
+        buf = ""
+        for para in paragraphs:
+            # 段落内过长时，进一步按句切分
+            pieces = cls._split_sentences(para) if len(para) > max_unit_chars else [para]
+            for piece in pieces:
+                if not piece.strip():
+                    continue
+                if buf and len(buf) + len(piece) + 1 > max_unit_chars:
+                    units.append(buf)
+                    buf = piece
+                else:
+                    buf = f"{buf}\n{piece}" if buf else piece
+                # 单片段本身超限（罕见）→ 硬切兜底
+                while len(buf) > max_unit_chars:
+                    units.append(buf[:max_unit_chars])
+                    buf = buf[max_unit_chars:]
+        if buf:
+            units.append(buf)
+        return units
+
     @staticmethod
     def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-        """按字符滑动分块，带重叠以保留上下文（3.2.1）"""
+        """旧版固定字符滑动分块（保留向后兼容；生产路径已改用 _chunk_text_semantic）"""
         if not text:
             return []
         if len(text) <= chunk_size:
@@ -189,7 +234,14 @@ class KnowledgeBase:
         metadatas: Optional[list[dict]] = None,
         source: str = "manual",
     ) -> int:
-        """批量写入文档。metadatas 可含 timestamp（ISO）用于时效治理。"""
+        """
+        批量写入文档。metadatas 可含 timestamp（ISO）用于时效治理。
+
+        采用语义完整分块（绝不拦腰断句），每个单元附带结构化元数据：
+        - unit_index: 该单元在原文中的顺序
+        - doc_id: 同一文档多单元共享（便于整篇取回）
+        - entity_ids: 关联的知识图谱实体（由 StructuredIndex 回填）
+        """
         now_iso = datetime.now(timezone.utc).isoformat()
         entries = []
 
@@ -198,12 +250,18 @@ class KnowledgeBase:
             meta.setdefault("timestamp", now_iso)
             meta.setdefault("source", source)
 
-            for chunk in self._chunk_text(doc):
+            doc_id = self._doc_id(doc, source)
+            units = self._chunk_text_semantic(doc)
+            for idx, unit in enumerate(units):
+                unit_meta = dict(meta)
+                unit_meta.setdefault("unit_index", idx)
+                unit_meta.setdefault("doc_id", doc_id)
+                unit_meta.setdefault("entity_ids", [])
                 entries.append({
-                    "id": self._doc_id(chunk, meta.get("timestamp", "")),
-                    "text": chunk,
-                    "embedding": _embed_texts([chunk])[0],
-                    "metadata": meta,
+                    "id": self._doc_id(unit, meta.get("timestamp", "")),
+                    "text": unit,
+                    "embedding": _embed_texts([unit])[0],
+                    "metadata": unit_meta,
                 })
 
         if not entries:
@@ -319,6 +377,29 @@ class KnowledgeBase:
             scored.append({"text": doc, "score": round(similarity + keyword_bonus + freshness, 4), "metadata": meta})
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
+
+    # ── 结构化索引辅助 ──
+    def units_of_doc(self, doc_id: str) -> list[dict]:
+        """返回同一文档（doc_id）的所有分块单元，供 StructuredIndex 回填实体 id。"""
+        return [d for d in self._docs if (d.get("metadata") or {}).get("doc_id") == doc_id]
+
+    def link_entities(self, unit_id: str, entity_ids: list[str]) -> bool:
+        """
+        将知识图谱实体 id 回填到指定单元（按 id 定位，跨后端兼容）。
+
+        Returns:
+            True 表示已回填；单元不存在时返回 False。
+        """
+        if self._backend == "chroma":
+            return False  # Chroma 后端不支持原地回填（元数据不可变）
+        for d in self._docs:
+            if d.get("id") == unit_id:
+                meta = d.setdefault("metadata", {})
+                merged = list(dict.fromkeys(meta.get("entity_ids", []) + list(entity_ids)))
+                meta["entity_ids"] = merged
+                self._save()
+                return True
+        return False
 
     # ── 便捷：从文件导入 ──
     def add_from_file(self, path: str, source: Optional[str] = None) -> int:

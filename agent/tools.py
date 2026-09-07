@@ -135,6 +135,78 @@ async def knowledge_search(
 
 
 @tool
+async def graph_search(
+    query: str,
+    top_k: int = 5,
+    max_hops: int = 2,
+) -> str:
+    """知识图谱检索工具。用于需要**多跳推理**或**精确消歧**的垂直场景，
+    例如医疗问诊（症状→疾病→用药）、法律案件（人物→关系→法条）、家族/组织关系（某人→关系→某人）等。
+
+    【应调用】的场景：
+    - 问题需要从「A 与 B 的关系」这类多步推导，而非单段文本能直接回答
+    - 需要区分同名同型/不同型的实体（消歧）
+    - 问题指向已沉淀到内部知识库的结构化关系（非互联网最新信息）
+
+    【不应调用】的场景：
+    - 实时互联网信息（改用 search 工具）
+    - 普通内部文档片段检索（改用 knowledge_search 工具）
+
+    参数说明：
+    - query: 检索查询词，用关键实体名或问题关键词
+    - top_k: 返回相关文档条数，1-10，默认 5
+    - max_hops: 图谱多跳遍历深度，1-3，默认 2
+
+    返回：JSON 字符串，summary 为相关文档片段（含关联实体），
+    paths 为多跳推理路径；sources 为结构化来源。
+    """
+    try:
+        from rag.structured import get_structured_index
+    except ImportError:
+        return json.dumps({"summary": "（知识图谱不可用）", "paths": [], "sources": []}, ensure_ascii=False)
+
+    idx = get_structured_index()
+    result = idx.search(
+        query,
+        top_k=min(max(top_k, 1), 10),
+        max_hops=min(max(max_hops, 1), 3),
+    )
+
+    docs = result.get("docs", [])
+    paths_text = idx.kg.format_paths(result.get("paths", [])) if hasattr(idx, "kg") else ""
+
+    lines = []
+    sources = []
+    for i, r in enumerate(docs, 1):
+        meta = r.get("metadata", {})
+        source = meta.get("source", "未知来源")
+        lines.append(f"[{i}] {source} (相关性: {r['score']:.2f})")
+        lines.append(r["text"])
+        entities = r.get("entities", [])
+        if entities:
+            names = ", ".join(e.get("name", "") for e in entities)
+            lines.append(f"    ↳ 关联实体: {names}")
+        lines.append("")
+        sources.append({
+            "url": meta.get("url", ""),
+            "title": source,
+            "snippet": r["text"][:200],
+        })
+
+    if paths_text:
+        lines.append("多跳推理路径:")
+        lines.append(paths_text)
+
+    if not docs and not paths_text:
+        lines.append("（知识图谱中未找到相关内容）")
+
+    return json.dumps(
+        {"summary": "\n".join(lines), "paths": paths_text, "sources": sources},
+        ensure_ascii=False,
+    )
+
+
+@tool
 def calculator(expression: str) -> str:
     """安全数学计算器。用于需要精确数值计算的场景（算术、百分比、单位换算等）。
 

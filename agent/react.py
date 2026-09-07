@@ -19,7 +19,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from agent.models import GeneratedAnswer, Source
-from agent.tools import calculator, current_time, knowledge_search, search
+from agent.tools import calculator, current_time, graph_search, knowledge_search, search
 from config import get_agent_config, get_api_config, resolve_llm_connection
 from tools.registry import generate_fallback_answer
 from utils.context import compress_history
@@ -33,6 +33,7 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
 ## 可用工具与边界
 - `search`: 实时联网搜索，用于最新新闻/股价/天气等**时效性互联网信息**
 - `knowledge_search`: 本地知识库检索，用于**内部文档/制度/历史决策**等沉淀知识
+- `graph_search`: 知识图谱检索，用于需要**多跳推理/精确消歧**的垂直场景（医疗、法律、家族/组织关系等）
 - `calculator`: 精确数值计算
 - `current_time`: 获取当前时间
 
@@ -40,6 +41,7 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
 1. **先判断**：回答用户问题需要什么信息？
    - 最新/时效性信息 → `search`
    - 内部文档/沉淀知识 → `knowledge_search`
+   - 多跳关系推理/实体消歧 → `graph_search`
    - 精确计算 → `calculator`；需要当前时间 → `current_time`
    - 常识/翻译/逻辑推理等 → 直接作答，不调工具
 2. **按需多次调用**：一次结果不足可换更精确的查询词再次调用
@@ -83,7 +85,7 @@ class ReactAgent:
         )
         self._graph = create_react_agent(
             self._llm,
-            tools=[search, knowledge_search, calculator, current_time],
+            tools=[search, knowledge_search, graph_search, calculator, current_time],
             prompt=REACT_SYSTEM_PROMPT,
         )
         self._recursion_limit = agent_cfg.react_recursion_limit
