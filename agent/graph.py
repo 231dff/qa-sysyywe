@@ -16,6 +16,8 @@ from typing import Optional
 from agent.models import GeneratedAnswer
 from agent.react import ReactAgent
 from config import get_agent_config
+from memory.user_store import get_user_store
+from memory.memory_manager import get_memory_manager
 from utils.guardrails import check_input_guardrails
 from utils.helpers import URLDeduplicator, generate_session_id
 
@@ -38,12 +40,15 @@ class SearchAgent:
             window_size=get_agent_config().dedup_window
         )
         self._sessions: dict[str, list[dict[str, str]]] = {}
+        self._user_store = get_user_store()
+        self._memory = get_memory_manager()
         self._react = ReactAgent(verbose=verbose)
 
     async def run(
         self,
         user_query: str,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> GeneratedAnswer:
         """执行完整的 ReAct 问答流水线"""
         agent_cfg = get_agent_config()
@@ -65,16 +70,28 @@ class SearchAgent:
         if session_id is None:
             session_id = generate_session_id()
         if session_id not in self._sessions:
-            self._sessions[session_id] = []
+            # 先尝试从持久化存储恢复该用户的会话
+            restored = (
+                self._user_store.get_history(user_id, session_id)
+                if user_id
+                else []
+            )
+            self._sessions[session_id] = restored
         history = self._sessions[session_id]
+
+        # 记忆召回：语义（长期事实）+ 情景（相关历史）→ 注入为 system 前缀
+        memory_ctx = self._memory.recall(user_id, user_query)
+        memory_context = memory_ctx.render() if user_id else ""
 
         if agent_cfg.verbose:
             print(f"\n{'='*60}")
-            print(f"[Agent] session={session_id}, query={user_query[:80]}...")
+            print(f"[Agent] user={user_id}, session={session_id}, query={user_query[:80]}...")
             print(f"[Agent] 历史轮次: {len(history)//2}")
+            if memory_context:
+                print(f"[Agent] 记忆注入: {len(memory_ctx.facts)} 事实 / {len(memory_ctx.episodes)} 情景片段")
 
         # 委托 ReactAgent 执行单轮
-        final_answer = await self._react.run(user_query, history)
+        final_answer = await self._react.run(user_query, history, memory_context=memory_context)
 
         # 更新对话历史
         history.append({"role": "user", "content": user_query})
@@ -87,6 +104,12 @@ class SearchAgent:
         else:
             self._sessions[session_id] = history
 
+        # 持久化到用户存储（跨进程/重启恢复）+ 记忆写回（情景 + 语义事实）
+        if user_id:
+            self._user_store.set_history(user_id, session_id, self._sessions[session_id])
+            self._memory.remember(user_id, session_id, "user", user_query)
+            self._memory.remember(user_id, session_id, "assistant", final_answer.answer)
+
         if agent_cfg.verbose:
             status = "⚠️ 降级" if final_answer.is_fallback else "✅ 正常"
             print(f"[Agent] 完成 {status} | 置信度:{final_answer.confidence:.0%} "
@@ -96,10 +119,10 @@ class SearchAgent:
 
         return final_answer
 
-    async def run_stream(self, user_query: str, session_id: str = "default"):
+    async def run_stream(self, user_query: str, session_id: str = "default", user_id: Optional[str] = None):
         """流式运行（用于 Streamlit 前端），yield 分步输出状态"""
         yield {"type": "status", "message": "🔄 正在处理..."}
-        result = await self.run(user_query, session_id)
+        result = await self.run(user_query, session_id, user_id=user_id)
         yield {"type": "status", "message": "✅ 完成"}
         yield {"type": "answer", "data": result}
 

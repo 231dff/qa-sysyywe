@@ -20,12 +20,17 @@ from typing import Optional
 # ============================================================
 # 直接/间接注入的常见模式
 _INJECTION_PATTERNS: list[re.Pattern] = [
-    # 试图覆盖系统提示
-    re.compile(r"(忽略|无视|忘记|跳过|抛弃)[^\n]{0,30}(之前|上述|以上|所有|系统)?[^\n]{0,20}(指令|提示|规则|设定|限制)", re.IGNORECASE),
-    re.compile(r"(你现在是|扮演|假装是|从现在开始你是)[^\n]{0,40}", re.IGNORECASE),
+    # 试图覆盖系统提示（忽略/忘记/忘掉 + 指令/规则/设定/限制）
+    re.compile(r"(忽略|无视|忘记|忘掉|跳过|抛弃)[^\n]{0,30}(之前|上述|以上|所有|系统)?[^\n]{0,20}(指令|提示|规则|设定|限制)", re.IGNORECASE),
+    # 角色扮演越狱（你现在是 / 扮演 / 假装(是/你是) / 从现在开始你是）
+    re.compile(r"(你现在是|扮演|假装是|假装你是|从现在开始你是)[^\n]{0,40}", re.IGNORECASE),
+    # 要求泄露系统提示（正向：系统提示→泄露；反向：泄露/打印→系统提示）
     re.compile(r"(系统提示|system prompt)[^\n]{0,20}(泄露|泄漏|打印|输出|显示|告诉我)", re.IGNORECASE),
-    # 编码绕过（base64 常见前缀）
-    re.compile(r"(base64|aGVsbG8|IHN5c3RlbQ)", re.IGNORECASE),
+    re.compile(r"(泄露|泄漏|打印|输出|显示|告诉我)[^\n]{0,20}(系统提示|system prompt)", re.IGNORECASE),
+    # 编码绕过：检测具体 base64 编码内容样例 + 「base64 + 解码/执行」危险意图
+    # （不匹配裸「base64」词，避免误伤「Python 的 base64 模块怎么用」等正常技术提问）
+    re.compile(r"(aGVsbG8|IHN5c3RlbQ)", re.IGNORECASE),
+    re.compile(r"base64[^\n]{0,10}(解码|decode|执行|还原|绕过)", re.IGNORECASE),
     # 要求突破工具/权限边界
     re.compile(r"(绕过|突破|bypass)[^\n]{0,30}(限制|权限|过滤|安全|审查)", re.IGNORECASE),
 ]
@@ -134,7 +139,7 @@ def validate_tool_call(tool_name: str, tool_args: dict, allowed_tools: Optional[
     if allowed_tools is not None and tool_name not in allowed_tools:
         return GuardResult(safe=False, blocked=True, reason=f"工具 {tool_name} 不在允许列表", flagged=["tool_not_allowed"])
 
-    if tool_name in ("search", "tavily_search", "knowledge_search"):
+    if tool_name in ("search", "tavily_search", "knowledge_search", "graph_search"):
         query = tool_args.get("query", "")
         if not query or not query.strip():
             return GuardResult(safe=False, blocked=True, reason="搜索 query 不能为空", flagged=["empty_query"])

@@ -32,6 +32,15 @@ htmlcov/
 # 工作树
 .claude/
 
+# 评测报告（自动生成）
+evals/eval_report.html
+evals/eval_report.json
+evals/report.html
+evals/benchmark.html
+
+# 测试日志
+*.log
+
 # Next.js 前端
 frontend/node_modules/
 frontend/.next/

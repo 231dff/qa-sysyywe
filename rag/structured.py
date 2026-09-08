@@ -17,12 +17,14 @@
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from rag import get_knowledge_base
 from rag.extractor import extract_entities_relations
 from rag.graph import get_knowledge_graph
+from utils.metrics import record_graph_search, update_graph_size
 
 
 class StructuredIndex:
@@ -131,6 +133,7 @@ class StructuredIndex:
             {"docs": [{text, score, metadata, entities: [实体 dict]}...],
              "paths": [多跳路径...]}
         """
+        start = time.perf_counter()
         docs = self.kb.search(query, top_k=top_k, **kwargs)
         enriched: list[dict] = []
         seen_entity_ids: set[str] = set()
@@ -149,6 +152,10 @@ class StructuredIndex:
         # 从「查询词 + 检索命中实体名」出发做多跳，中文查询无空格时也能借实体名回溯出路径
         terms = list(dict.fromkeys([t for t in query.split() if t] + sorted(entity_names)))
         paths = self.kg.query_paths(terms, max_hops=max_hops)
+
+        # 埋点：graph_search 延迟 + 图谱规模
+        record_graph_search(time.perf_counter() - start)
+        update_graph_size(self.kg.count_entities(), self.kg.count_relations())
         return {"docs": enriched, "paths": paths}
 
 

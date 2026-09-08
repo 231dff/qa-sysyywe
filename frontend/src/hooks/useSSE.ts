@@ -3,8 +3,16 @@
 // 智能搜索助手 — SSE 流式消费 Hook
 // 注意: SSE 流式请求必须直连后端，不能走 Next.js rewrites 代理（会被缓冲，导致前端收不到 token）
 import { useState, useCallback, useRef } from "react";
-import type { ChatRequest, SSEEvent, SourceInfo, DoneEvent } from "../lib/types";
-
+import type {
+  ChatRequest,
+  SSEEvent,
+  SourceInfo,
+  DoneEvent,
+  ProgressEvent,
+  TokenEvent,
+  SourcesEvent,
+  ErrorEvent,
+} from "../lib/types";
 /** SSE 流式端点 — 直连后端。
  *  - 本地开发: http://localhost:8000
  *  - Docker/生产: Next.js API Route 代理 (同域，无跨域)
@@ -140,32 +148,42 @@ export function useSSE() {
 /** 将 SSE 事件分发到 setState 更新 */
 function handleEvent(
   eventType: string,
-  data: any,
+  data: SSEEvent["data"],
   setState: React.Dispatch<React.SetStateAction<UseSSEState>>
 ) {
   switch (eventType) {
-    case "progress":
+    case "progress": {
+      const d = data as ProgressEvent;
       setState((prev) => ({
         ...prev,
-        progressNode: data.node,
-        progressMessage: data.message,
+        progressNode: d.node,
+        progressMessage: d.message,
       }));
       break;
-    case "token":
-      setState((prev) => ({ ...prev, tokens: prev.tokens + data.text }));
+    }
+    case "token": {
+      const d = data as TokenEvent;
+      setState((prev) => ({ ...prev, tokens: prev.tokens + d.text }));
       break;
-    case "sources":
-      setState((prev) => ({ ...prev, sources: data.sources }));
+    }
+    case "sources": {
+      const d = data as SourcesEvent;
+      setState((prev) => ({ ...prev, sources: d.sources }));
       break;
-    case "done":
-      setState((prev) => ({ ...prev, meta: data }));
+    }
+    case "done": {
+      const d = data as DoneEvent;
+      setState((prev) => ({ ...prev, meta: d }));
       break;
-    case "error":
+    }
+    case "error": {
+      const d = data as ErrorEvent;
       setState((prev) => ({
         ...prev,
         status: "error",
-        error: data.message,
+        error: d.message,
       }));
       break;
+    }
   }
 }

@@ -3,12 +3,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/231dff/qa-sys-"><img src="https://img.shields.io/badge/GitHub-231dff%2Fqa--sys---181717?logo=github" alt="GitHub Repo"></a>
+  <a href="https://github.com/231dff/qa-sysyywe"><img src="https://img.shields.io/badge/GitHub-231dff%2Fqa--sysyywe-181717?logo=github" alt="GitHub Repo"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/Python-3.12+-blue?logo=python" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Next.js-16-000000?logo=next.js" alt="Next.js 16">
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react" alt="React 19">
-  <img src="https://img.shields.io/badge/Tests-131%20passed-success?logo=pytest" alt="131 tests">
+  <img src="https://img.shields.io/badge/Tests-203%20passed-success?logo=pytest" alt="203 tests">
+  <img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions" alt="GitHub Actions">
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker" alt="Docker">
   <img src="https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus" alt="Prometheus">
   <img src="https://img.shields.io/badge/Grafana-dashboards-F46800?logo=grafana" alt="Grafana">
@@ -20,12 +21,6 @@
 
 ## 🖼️ 界面预览
 
-**前端界面**（极简灰阶设计）：
-
-<p align="center">
-  <img src="ui-screenshot.jpg" alt="前端界面截图" width="100%" />
-</p>
-
 **Grafana 监控面板**（可用性 SLA 可视化）：
 
 <p align="center">
@@ -33,21 +28,24 @@
 </p>
 
 
-基于 **LangGraph (ReAct)** + **Tavily API** + **FastAPI** + **Next.js 16** 构建的自主决策搜索 Agent。支持 OpenAI 兼容的 LLM（OpenAI / 阿里云百炼 DashScope / DeepSeek 等多平台）。
+基于 **LangGraph (ReAct)** + **Tavily API** + **FastAPI** + **Next.js 16** 构建的自主决策搜索 Agent。支持 OpenAI 兼容的 LLM（OpenAI / 阿里云百炼 DashScope / DeepSeek 等多平台），并内置**结构化索引（知识图谱多跳推理）**与**跨会话记忆系统（语义 + 情景）**。
 
 ## ✨ 核心特性
 
 - **ReAct 自主决策**: LLM 根据工具描述按需加载工具、自主决定「是否搜索 / 搜索几次 / 何时停止」，不再硬编码流水线
 - **多平台适配**: `LLM_PROVIDER=openai|qwen|deepseek` 一键切换，自动处理 `response_format` / embedding 等平台差异
 - **实时搜索**: Tavily API 联网搜索，突破 LLM 知识时效限制
-- **RAG 知识库**: 本地知识库检索（分块 + 混合检索 + 时效治理），纯 Python 持久化零冲突，可选 ChromaDB / 本地 embedding
+- **RAG 知识库**: 本地知识库检索（语义分块 + 混合检索 + 时效治理），纯 Python 持久化零冲突，可选 ChromaDB / 本地 embedding
+- **知识图谱 + 多跳推理**: LLM 实体/关系抽取 → 稳定哈希消歧 → BFS 多跳遍历，支撑医疗问诊、法律案件、家族关系等垂直场景的「A→关系→B」精确推导
+- **跨会话记忆系统**: 语义记忆（长期事实）+ 情景记忆（相关历史召回）+ 编排层，user_id 隔离持久化，Agent 无需用户重复交代
 - **护栏与安全**: 提示注入检测、敏感信息脱敏、工具权限白名单、日志脱敏
 - **上下文压缩**: 分层历史压缩 + 前缀稳定化（利于 prompt cache / KV cache），降低延迟与 token 开销
-- **辅助工具**: 安全计算器（AST 白名单）、当前时间、知识库检索等按需加载
+- **辅助工具**: 安全计算器（AST 白名单）、当前时间、知识库检索、图谱检索等按需加载
 - **SSE 流式输出**: LLM 答案逐 Token 推送到前端
 - **多层容错**: 指数退避重试 + LLM 降级回答，异常期可用性 **95%+**
-- **多轮对话**: 基于会话 ID 的上下文缓存 + 分层压缩
+- **多轮对话**: 基于会话 ID 的上下文缓存 + 分层压缩 + 跨进程持久化恢复
 - **可观测性栈**: Prometheus 指标采集 + Grafana 可视化仪表盘 + 告警规则
+- **企业级评测框架**: 6 类评测套件（离线回归 / 故障注入 / 安全审计 / 在线监控 / 检索质量 / 记忆）+ 门禁机制，一条命令驱动，供 CI 判定
 - **企业级 UI**: 极简灰阶设计，去 AI 味，专业排版
 
 ## 🏗️ 架构
@@ -67,12 +65,32 @@
 └──────────────────┘                       ├───────────────┤
                                            │ /api/metrics   │ ◄── Prometheus 抓取 (每 15s)
                                            │ Prometheus 指标 │
-┌──────────────────┐                       └───────────────┘
-│ Grafana 仪表盘    │ ◄─── PromQL ──── ┌──────────────────┐
-│ (port 3002)       │                  │ Prometheus        │
-│ 可用性 SLA 监控   │                  │ (port 9090)       │
-└──────────────────┘                  │ 抓取 + 告警        │
-                                      └──────────────────┘
+┌──────────────────┐                       └───────┬───────┘
+│ Grafana 仪表盘    │ ◄─── PromQL ──── ┌────────────┴───────┐
+│ (port 3002)       │                  │ Prometheus          │
+│ 可用性 SLA 监控   │                  │ (port 9090)         │
+└──────────────────┘                  │ 抓取 + 告警          │
+                                      └─────────────────────┘
+```
+
+### 记忆系统（三块地基，user_id 贯穿）
+
+```
+  用户发言 ──► MemoryManager.remember
+                 ├─► 情景记忆 EpisodicStore   （跨会话相关历史对话，关键词重叠 + 时间衰减召回）
+                 └─► 语义记忆 FactStore       （用户发言 → 规则/LLM 抽取长期事实，按置信度 upsert）
+
+  新一轮提问 ──► MemoryManager.recall(user_id, query)
+                 └─► 渲染「长期事实 + 相关历史片段」→ 注入 LLM 为 system 前缀
+```
+
+### 结构化索引（知识图谱多跳推理）
+
+```
+  KnowledgeBase（语义分块 + 向量检索）
+        └─► extractor（LLM 实体/关系抽取，失败静默降级）
+              └─► KnowledgeGraph（稳定哈希消歧 + BFS 多跳遍历）
+                    └─► 回填 entity_ids 到 KnowledgeBase 单元
 ```
 
 ### Agent 工作流（ReAct 循环）
@@ -88,7 +106,8 @@
                 │      └──────── 直接作答 ◄───────────┘         │
                 │                                             │
                 │  可用工具: search / knowledge_search /        │
-                │            calculator / current_time         │
+                │            graph_search / calculator /       │
+                │            current_time                      │
                 └─────────────────────────────────────────────┘
                                   │
                                   ▼
@@ -103,24 +122,32 @@
 qa/
 ├── agent/                          # Agent 核心模块
 │   ├── __init__.py                 # 模块入口
-│   ├── graph.py                    # SearchAgent 薄封装（委托 ReactAgent，会话管理）
+│   ├── graph.py                    # SearchAgent 薄封装（委托 ReactAgent，会话 + 记忆编排）
 │   ├── react.py                    # ReactAgent：create_react_agent + 系统提示 + 结果提取
-│   ├── tools.py                    # ReAct 工具集：search / knowledge_search / calculator / current_time
+│   ├── tools.py                    # ReAct 工具集：search / knowledge_search / graph_search / calculator / current_time
 │   ├── models.py                   # Pydantic 数据模型 + AgentState TypedDict
 │   └── streaming.py                # SSE 流式桥接（astream_events v2 → SSE 事件）
 ├── tools/                          # 工具注册中心（底层实现）
 │   ├── __init__.py                 # 工具模块
 │   └── registry.py                 # tavily_search / rewrite_query / score_relevance / fallback_answer + 组合流水线
-├── rag/                            # RAG 知识库
-│   └── __init__.py                 # 分块 + 混合检索 + 时效治理（纯 Python 持久化，可选 ChromaDB）
-├── memory/                         # 会话缓存
-│   ├── __init__.py                 # 内存模块
-│   └── session_store.py            # 会话缓存 (TTL 过期)
+├── rag/                            # RAG 知识库 + 结构化索引
+│   ├── __init__.py                 # KnowledgeBase：语义分块 + 混合检索 + 时效治理（纯 Python 持久化，可选 ChromaDB）
+│   ├── extractor.py                # LLM 实体/关系抽取（失败静默降级为空）
+│   ├── graph.py                    # KnowledgeGraph：稳定哈希消歧 + BFS 多跳推理
+│   └── structured.py               # StructuredIndex：分块→抽取→建图→回填 全链路编排
+├── memory/                         # 记忆系统
+│   ├── __init__.py                 # 记忆模块入口
+│   ├── session_store.py            # 会话缓存 (TTL 过期)
+│   ├── user_store.py               # 按 user_id 隔离的会话持久化（跨进程/重启恢复）
+│   ├── fact_store.py               # 语义记忆：长期事实存储（置信度 upsert）
+│   ├── episodic_store.py           # 情景记忆：跨会话相关历史检索（关键词重叠 + 时间衰减）
+│   ├── fact_extractor.py           # 长期事实抽取（规则优先 + 可选 LLM 兜底）
+│   └── memory_manager.py           # 记忆编排层：recall / remember，user_id 贯穿
 ├── utils/                          # 工具函数
 │   ├── __init__.py                 # 工具函数模块
 │   ├── helpers.py                  # URL 去重, Token 计数, 限流, 上下文裁剪
 │   ├── http_client.py              # 全局共享 HTTP 客户端 (连接池复用)
-│   ├── metrics.py                  # Prometheus 指标 + 滑动窗口可用性统计 (95% SLA)
+│   ├── metrics.py                  # Prometheus 指标 + 滑动窗口可用性统计 (95% SLA) + 图谱指标
 │   ├── guardrails.py               # 护栏：提示注入检测 / 敏感脱敏 / 工具白名单
 │   └── context.py                  # 上下文压缩：分层历史 + 前缀稳定化
 ├── monitoring/                     # 可观测性栈
@@ -129,25 +156,34 @@ qa/
 │   │   └── alerts.yml              # 告警规则 (高错误率/高延迟/服务宕机)
 │   └── grafana/
 │       ├── dashboards/
-│       │   ├── availability.json   # 可用性监控 Dashboard (4 区域 11 面板)
+│       │   ├── availability.json   # 可用性监控 Dashboard
 │       │   └── dashboard.yml       # Dashboard 自动加载配置
 │       └── datasources/
 │           └── prometheus.yml      # Prometheus 数据源
-├── tests/                          # 测试 (131 条)
+├── evals/                          # 企业级评测框架
+│   ├── __init__.py                 # 评测包（导出核心 API）
+│   ├── __main__.py                 # 统一入口：python -m evals
+│   ├── core.py                     # 框架底座：Suite 注册表 / 门禁 / JSON+HTML 报告
+│   ├── offline.py                  # 离线回归套件（pytest + 黄金行为数据集）
+│   ├── fault_injection.py          # 故障注入套件（LLM/搜索/存储/流水线降级）
+│   ├── security_audit.py           # 安全审计套件（护栏有效性对抗）
+│   ├── online.py                   # 在线监控套件（监控栈自检 + 实测 SLA 探测）
+│   ├── quality.py                  # 检索质量套件（RAG 命中率 + 图谱多跳 + 可选 judge）
+│   └── memory_suite.py             # 记忆套件（语义 + 情景 + 编排端到端）
+├── tests/                          # 测试 (203 条)
 │   ├── __init__.py                 # 测试包
 │   ├── test_core.py                # 单元测试 (去重/Token/限流/会话/模型)
 │   ├── test_registry.py            # 工具注册中心测试 (搜索/改写/打分/降级/流水线)
 │   ├── test_graph.py               # ReactAgent + SearchAgent 类测试
 │   ├── test_config.py              # 配置加载 + 单例 + 多平台 provider
 │   ├── test_production.py          # 护栏 / 上下文压缩 / provider 生产级测试
+│   ├── test_structured.py          # 结构化索引：知识图谱 + 多跳推理 + 抽取
+│   ├── test_episodic_store.py      # 情景记忆存储测试
+│   ├── test_fact_store.py          # 语义记忆（长期事实）存储测试
+│   ├── test_fact_extractor.py      # 事实抽取器测试（规则 + LLM 兜底）
+│   ├── test_user_store.py          # 用户会话持久化测试
+│   ├── test_memory_manager.py      # 记忆编排层测试
 │   └── test_e2e.py                 # 端到端 ReAct 流水线 + 会话测试
-├── evals/                          # 行为评估
-│   ├── __init__.py                 # 评估包
-│   ├── golden_dataset.json         # 黄金行为数据集 (30 用例, 80 断言)
-│   ├── evaluate.py                 # 自动化评估框架 (9 类别, HTML/JSON 报告)
-│   ├── benchmark.py                # 延迟 & Token 基准测试
-│   ├── report.html                 # HTML 评估报告 (自动生成)
-│   └── benchmark.html              # HTML 基准测试报告 (自动生成)
 ├── frontend/                       # Next.js 16 前端
 │   ├── app/
 │   │   ├── layout.tsx              # 根布局 (Geist 字体)
@@ -175,10 +211,14 @@ qa/
 │   ├── next.config.ts               # Next.js 配置 (rewrites 代理 + standalone 输出)
 │   ├── package.json                 # 依赖: Next.js 16.2, React 19.2, Tailwind CSS 4
 │   └── tsconfig.json                # TypeScript 配置
-├── server.py                       # FastAPI 后端入口 (SSE + REST API + 生命周期管理)
+├── .github/
+│   └── workflows/
+│       └── ci.yml                   # CI 门禁：后端评测 + 覆盖率 + 前端类型检查/Lint
+├── server.py                       # FastAPI 后端入口 (SSE + REST API + 记忆端点 + 生命周期管理)
 ├── app.py                           # Streamlit 开发调试面板
 ├── config.py                        # 全局配置 (pydantic-settings, 单例, 多平台 provider)
 ├── requirements.txt                 # Python 依赖
+├── pytest.ini                       # pytest 配置 (testpaths + asyncio 模式)
 ├── Dockerfile.backend               # 后端 Docker 镜像 (python:3.12-slim)
 ├── Dockerfile.frontend              # 前端 Docker 镜像 (多阶段 node:22-alpine)
 ├── docker-compose.yml               # 一键部署编排 (bridge 网络 + 健康检查)
@@ -344,34 +384,33 @@ streamlit run app.py
 #### 5. 运行测试
 
 ```bash
-# 全部测试 (131 条)
+# 全部测试 (203 条)
 pytest tests/ -v
 
 # 按模块运行
-pytest tests/test_core.py -v      # 单元测试 (33 条)
-pytest tests/test_registry.py -v  # 工具注册中心 (31 条)
-pytest tests/test_graph.py -v     # ReactAgent + SearchAgent (19 条)
-pytest tests/test_config.py -v    # 配置加载 (18 条)
-pytest tests/test_production.py -v # 护栏/压缩/provider (20 条)
-pytest tests/test_e2e.py -v       # 端到端 (10 条)
-
-# 行为评估 (30 用例, 80 断言)
-python -m evals.evaluate                     # 运行全部评估
-python -m evals.evaluate -r html             # 生成 HTML 报告
-python -m evals.evaluate -c happy_path       # 按类别运行
-python -m evals.evaluate --case happy-001    # 单条用例
-python -m evals.benchmark                    # 延迟 & Token 对比摘要
-python -m evals.benchmark --html             # 生成 HTML 基准报告
-python -m evals.benchmark --json             # 输出 JSON 格式
+pytest tests/test_core.py -v         # 单元测试 (33 条)
+pytest tests/test_registry.py -v     # 工具注册中心 (31 条)
+pytest tests/test_structured.py -v   # 结构化索引 + 知识图谱 (25 条)
+pytest tests/test_production.py -v   # 护栏/压缩/provider (25 条)
+pytest tests/test_graph.py -v        # ReactAgent + SearchAgent (19 条)
+pytest tests/test_config.py -v       # 配置加载 (18 条)
+pytest tests/test_episodic_store.py -v # 情景记忆 (10 条)
+pytest tests/test_e2e.py -v          # 端到端 (10 条)
+pytest tests/test_fact_store.py -v   # 语义记忆 (9 条)
+pytest tests/test_user_store.py -v   # 用户会话持久化 (8 条)
+pytest tests/test_fact_extractor.py -v # 事实抽取 (8 条)
+pytest tests/test_memory_manager.py -v # 记忆编排 (7 条)
 ```
 
 ## 📡 API 端点
 
 | 端点 | 方法 | 描述 |
 |------|------|------|
-| `/api/chat/stream` | POST | SSE 流式聊天 (query, session_id, model, search_depth, top_k) |
+| `/api/chat/stream` | POST | SSE 流式聊天 (query, session_id, user_id, model, search_depth, top_k) |
 | `/api/session/{id}` | GET | 获取会话历史 |
 | `/api/session/{id}` | DELETE | 清除会话 |
+| `/api/memory/{user_id}` | GET | 查看某用户的长期事实与情景记忆片段（观测/调试） |
+| `/api/memory/{user_id}` | DELETE | 清空某用户的语义 + 情景记忆 |
 | `/api/config/defaults` | GET | 获取默认配置 (model, search_depth, top_k, llm_api_base) |
 | `/api/health` | GET | 健康检查 (status, active_sessions) |
 | `/api/metrics` | GET | Prometheus 文本格式指标 |
@@ -381,7 +420,7 @@ python -m evals.benchmark --json             # 输出 JSON 格式
 ### SSE 事件类型
 
 ```
-event: progress  → {"node":"search|generate|fallback|score","message":"..."}
+event: progress  → {"node":"search|generate|fallback","message":"..."}
 event: token     → {"text":"逐token文本"}
 event: sources   → {"sources":[{url,title,snippet}]}
 event: done      → {confidence,latency_ms,tokens_used,is_fallback}
@@ -409,16 +448,42 @@ ReAct Agent 按需加载以下工具（每个工具的 docstring 即 JSON Schema
 |------|------|------|
 | `search` | 实时检索 | Tavily 联网搜索，返回去重排序的摘要 + 结构化来源 |
 | `knowledge_search` | 知识库 | 本地 RAG 检索（混合检索 + 时效过滤），返回知识片段 |
+| `graph_search` | 知识图谱 | 结构化索引检索（关联实体 + 多跳推理路径），用于消歧与关系推导 |
 | `calculator` | 计算 | 安全算术求值（AST 白名单，杜绝任意代码执行） |
 | `current_time` | 时间 | 获取当前 UTC 时间 |
 
 底层仍保留 `tools/registry.py` 中的 `tavily_search` / `rewrite_query` / `score_relevance` / `fallback_answer` 四个基础函数（供组合流水线与测试复用）。
 
+## 🧠 记忆系统
+
+解决「金鱼记忆」的三块地基，全部按 `user_id` 隔离、JSON 持久化、线程安全、空 `user_id` 安全降级：
+
+| 模块 | 职责 | 检索/写入策略 |
+|------|------|--------------|
+| `UserStore` | 会话持久化 | 按 `user_id` 隔离，跨进程/重启恢复历史 |
+| `FactStore`（语义记忆） | 长期事实 | 用户发言抽取 `{key, value, confidence}`，高置信度覆盖低置信度 |
+| `EpisodicStore`（情景记忆） | 相关历史召回 | 关键词重叠打分 + 时间衰减（半衰期 30 天），相邻去重 |
+| `MemoryManager`（编排层） | 统一召回/写回 | `recall` 渲染注入上下文；`remember` 落盘情景 + 抽取事实 |
+
+事实抽取（`fact_extractor.py`）**规则优先、零依赖、离线确定**，可选 `use_llm=True` 走 LLM 兜底（失败静默降级为规则结果）。抽取类别：名字 / 居住城市 / 职业 / 技术栈 / 年龄 / 偏好。
+
+## 🕸️ 结构化索引（知识图谱多跳推理）
+
+面向「多跳推理 + 精确消歧」的垂直场景（医疗问诊、法律案件、家族/组织关系管理）：
+
+| 组件 | 职责 |
+|------|------|
+| `rag/extractor.py` | LLM 实体/关系抽取（复用连接池 + 多平台降级，失败返回空不阻断） |
+| `rag/graph.py` | `KnowledgeGraph`：稳定哈希 id 去重 + 别名消歧 + BFS 多跳遍历 |
+| `rag/structured.py` | `StructuredIndex`：编排「分块 → 抽取 → 建图 → 回填」全链路 |
+
+写入链路：`KnowledgeBase` 语义分块 → `extractor` 抽取实体/关系 → `KnowledgeGraph` 建图（实体先于关系）→ 回填 `entity_ids` 到知识库单元。查询链路：`search` 融合 KB 混合检索 + 关联实体 + 多跳路径。LLM 抽取失败时**静默退化为「仅自然语言记忆，无图谱」**，绝不阻断写入。
+
 ## 🧪 测试分层
 
-项目采用**分层测试策略**，131 条测试 + 30 条评估用例（80 断言）全部 mock 外部 API，无需联网即可运行。
+项目采用**分层测试策略**，203 条测试全部 mock 外部 API，无需联网即可运行。
 
-### 第一层: 单元测试 (`test_core.py` + `test_config.py` + `test_production.py`) — 71 条
+### 第一层: 单元测试 (`test_core.py` + `test_config.py` + `test_production.py` + 记忆存储) — 105 条
 
 | 测试类 | 覆盖内容 |
 |--------|----------|
@@ -427,35 +492,52 @@ ReAct Agent 按需加载以下工具（每个工具的 docstring 即 JSON Schema
 | `TestPromptInjection` / `TestRedaction` / `TestToolGuardrail` | 提示注入检测、敏感脱敏、工具护栏 |
 | `TestContextCompression` | 分层历史压缩、工具结果裁剪 |
 | `TestProviderConfig` | 多平台 provider 预设与能力探测 |
+| `TestFactStore` / `TestEpisodicStore` / `TestUserStore` / `TestFactExtractor` | 记忆系统三块地基：事实存储、情景存储、会话持久化、事实抽取 |
 
-### 第二层: 集成测试 (`test_registry.py` + `test_graph.py`) — 50 条
+### 第二层: 集成测试 (`test_registry.py` + `test_graph.py` + `test_structured.py`) — 75 条
 
 | 测试类 | 覆盖内容 |
 |--------|----------|
 | `TestTavilySearch` / `TestRewriteQuery` / `TestScoreRelevance` / `TestFallbackAnswer` / `TestSearchAndFilterPipeline` / `TestToolRegistryMetadata` | 工具函数与组合流水线（签名保持稳定） |
 | `TestReactAgentHelpers` / `TestReactAgentRun` / `TestSearchAgentClass` / `TestReactSystemPrompt` | ReAct 循环、结果提取、会话管理、系统提示 |
+| `TestKnowledgeGraph` / `TestExtractor` / `TestStructuredIndex` | 知识图谱消歧 + 多跳推理、实体抽取、结构化索引编排 |
 
-### 第三层: 端到端测试 (`test_e2e.py`) — 10 条
+### 第三层: 端到端测试 (`test_e2e.py` + `test_memory_manager.py`) — 17 条
 
 | 测试类 | 覆盖路径 |
 |--------|----------|
 | `TestAgentPipelineE2E` | ReAct 正常流程 / 搜索失败→降级 / 生成失败→二次降级 / 多轮对话 / 历史裁剪 |
 | `TestSessionManagement` | 自动 session + 清除会话 |
 | `TestResultValidation` | 来源去重 + 延迟记录 + 流式输出契约 |
+| `TestMemoryManager` | 记忆编排端到端：remember 抽取事实 + recall 渲染注入 + 隔离降级 |
 
-### 评估类别 (9 类, 30 用例, 80 断言)
+## 📋 企业级评测框架
 
-| 类别 | 用例 | 覆盖场景 |
+一条命令跑 6 类评测套件，输出 console + JSON + HTML 三种报告，并以**门禁结果决定退出码**（供 CI / pre-commit 判定）。
+
+```bash
+python -m evals                        # 跑全部 6 类套件
+python -m evals --kind offline_regression   # 单跑离线回归
+python -m evals --kind fault_injection      # 故障注入
+python -m evals --kind security_audit       # 安全审计
+python -m evals --kind online_monitoring    # 在线监控
+python -m evals --kind quality              # 检索质量
+python -m evals --kind memory               # 记忆
+python -m evals --kind online_monitoring --probe   # 探测运行中后端实测 SLA
+python -m evals --kind quality --judge      # 启用 LLM-as-judge 忠实度（需 key）
+python -m evals --list                     # 列出已注册套件
+python -m evals -o report.json             # 指定报告路径
+python -m evals --html                     # 额外输出 HTML 报告
+```
+
+| 套件 | kind | 门禁口径 |
 |------|------|----------|
-| `happy_path` | 6 | 正常 ReAct 流程 (事实/对比/教程/新闻) |
-| `degradation` | 2 | 降级路径 (空答案→降级 / 图异常→二次降级) |
-| `tool_behavior` | 6 | 工具行为 (搜索/改写/打分/降级/流水线) |
-| `multi_turn` | 4 | 多轮对话 (历史累积/裁剪/清除) |
-| `state_integrity` | 2 | 状态完整性 (AgentState 键/GeneratedAnswer 字段) |
-| `edge_case` | 5 | 边缘情况 (空查询/问候/超长/emoji) |
-| `guardrails` | 3 | 护栏 (注入检测/正常放行/脱敏) |
-| `rag` | 1 | RAG 检索质量 (相关性排序) |
-| `provider` | 1 | 多平台能力探测 (DeepSeek 差异) |
+| 离线回归 | `offline_regression` | pytest 0 failed/0 error 且黄金行为数据集 0 失败 |
+| 故障注入 | `fault_injection` | 所有降级场景「优雅降级、绝不崩溃」 |
+| 安全审计 | `security_audit` | 漏检(MISSED)=0 且误报(FALSE_POSITIVE)=0 |
+| 在线监控 | `online_monitoring` | 监控栈配置完整（`--probe` 时升级为实测 95% SLA） |
+| 检索质量 | `quality` | 强关键词检索 hit@1=100% 且图谱推理全过 |
+| 记忆 | `memory` | 语义 + 情景 + 编排端到端全过 |
 
 ## 🛡️ 容错机制
 
@@ -465,6 +547,9 @@ ReAct Agent 按需加载以下工具（每个工具的 docstring 即 JSON Schema
 | 查询改写失败 (JSON 解析/网络异常) | 回退到原始用户输入 |
 | 相关性打分失败 | 使用 Tavily 原始分数 (已默认跳过 LLM 打分) |
 | LLM API 故障 | 友好错误提示 + 二次降级 |
+| 实体/关系抽取失败 | 静默降级为「仅自然语言记忆，无图谱」，绝不阻断写入 |
+| 图谱/知识库 JSON 损坏 | 加载空图/空库，不崩溃 |
+| 记忆 user_id 为空 | 安全降级（不落盘、返回空），上层可无条件调用 |
 | 提示注入 | 请求级阻断，返回拒绝提示 |
 | 配额耗尽 | 滑动窗口限流，提前拦截 |
 | ReAct 死循环 | `recursion_limit` 递归上限 + `max_react_iterations` 迭代上限 |
@@ -476,6 +561,7 @@ ReAct Agent 按需加载以下工具（每个工具的 docstring 即 JSON Schema
 - ReAct 自主决策: LLM 按需加载工具，避免固定流水线的冗余调用
 - 上下文压缩: 分层历史摘要 + 前缀稳定化，降低跨轮 token 与 KV 占用
 - 连接池复用: 消除每次 HTTP 调用的 TCP/TLS 握手开销
+- 知识图谱: 稳定哈希消歧 + BFS 多跳推理，支撑关系型推导场景
 
 ## 📊 业务场景
 
@@ -485,6 +571,17 @@ ReAct Agent 按需加载以下工具（每个工具的 docstring 即 JSON Schema
 - **对比分析**: "GPT-4 和 Claude 哪个更强？"
 - **教程指南**: "最新的 Python 3.13 有哪些新特性？"
 - **内部知识**: "公司的报销流程是什么？"（走 RAG 知识库）
+- **关系推理**: "张三的父亲是谁？"（走知识图谱多跳推理）
+- **记忆复用**: "我上次提到的技术栈是什么？"（走跨会话记忆召回）
+
+## 🔄 CI / CD
+
+`.github/workflows/ci.yml` 定义两道门禁，在 push 到 `main` / `feat/**` 分支及所有 PR 时触发：
+
+| Job | 内容 |
+|-----|------|
+| `backend-evals` | `python -m evals`（6 套件 + 门禁）+ `pytest --cov` 覆盖率报告（阈值 70%） |
+| `frontend-checks` | `npm run typecheck` + `npm run lint` |
 
 ## 📄 License
 

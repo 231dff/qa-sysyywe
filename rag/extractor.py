@@ -20,7 +20,7 @@ from typing import Optional
 
 from config import get_api_config, get_agent_config
 from utils.http_client import get_http_client
-from utils.metrics import record_error, record_llm_call, record_tokens
+from utils.metrics import record_error, record_extraction, record_llm_call, record_tokens
 
 # ============================================================
 # 抽取提示词
@@ -107,6 +107,7 @@ async def extract_entities_relations(text: str) -> dict:
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
         )
+        record_extraction("success")
 
         return {
             "entities": _coerce_entities(parsed.get("entities", [])),
@@ -117,6 +118,7 @@ async def extract_entities_relations(text: str) -> dict:
         elapsed = time.perf_counter() - start
         record_llm_call("extract", elapsed)
         record_error("llm_error")
+        record_extraction("failure")
         if agent_cfg.verbose:
             print(f"[实体抽取失败] {exc}, 降级为仅自然语言记忆")
         return {"entities": [], "relations": []}

@@ -23,6 +23,7 @@ from agent.graph import SearchAgent
 from agent.streaming import run_stream_sse
 from config import get_api_config, get_agent_config
 from memory.session_store import get_session_store
+from memory.memory_manager import get_memory_manager
 from utils.helpers import generate_session_id
 from utils.http_client import set_shared_client, reset_shared_client
 from utils.metrics import (
@@ -124,6 +125,7 @@ def get_agent() -> SearchAgent:
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, description="用户问题")
     session_id: Optional[str] = Field(None, description="会话 ID (不传则自动生成)")
+    user_id: Optional[str] = Field(None, description="用户 ID (用于跨会话记忆归属)")
     model: Optional[str] = Field(None, description="LLM 模型覆盖 (e.g. gpt-4o)")
     search_depth: Optional[str] = Field(None, description="搜索深度 (basic | advanced)")
     top_k: Optional[int] = Field(None, ge=2, le=10, description="保留 Top-K 片段")
@@ -165,6 +167,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             agent=agent,
             user_query=req.query,
             session_id=sid,
+            user_id=req.user_id,
             model_override=req.model,
             search_depth_override=req.search_depth,
             top_k_override=req.top_k,
@@ -208,6 +211,40 @@ async def delete_session(session_id: str):
     agent = get_agent()
     agent.clear_session(session_id)
     return {"ok": True}
+
+
+# ============================================================
+# 记忆端点（user_id 贯穿的语义 + 情景记忆观测）
+# ============================================================
+@app.get("/api/memory/{user_id}")
+async def get_memory(user_id: str):
+    """查看某用户当前的长期事实与情景记忆片段（观测/调试用）。"""
+    mm = get_memory_manager()
+    facts = mm.facts.get_facts(user_id)
+    episodes = _list_episodes(mm, user_id)
+    return {
+        "user_id": user_id,
+        "facts": facts,
+        "episodes": episodes,
+        "facts_count": len(facts),
+        "episodes_count": len(episodes),
+    }
+
+
+def _list_episodes(mm, user_id: str) -> list[dict]:
+    """返回该用户全部情景片段（最近在前），供观测端点使用。"""
+    rec = mm.episodes._users.get(user_id)
+    eps = list(rec.get("episodes", [])) if rec else []
+    return list(reversed(eps))
+
+
+@app.delete("/api/memory/{user_id}")
+async def clear_memory(user_id: str):
+    """清空某用户的语义 + 情景记忆（不删会话历史）。"""
+    mm = get_memory_manager()
+    mm.facts.clear_user(user_id)
+    mm.episodes.clear_user(user_id)
+    return {"ok": True, "user_id": user_id}
 
 
 # ============================================================

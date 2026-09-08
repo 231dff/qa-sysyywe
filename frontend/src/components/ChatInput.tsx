@@ -1,7 +1,7 @@
 "use client";
 
 // 智能搜索助手 — 聊天输入框
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 
 interface ChatInputProps {
   onSubmit: (text: string) => void;

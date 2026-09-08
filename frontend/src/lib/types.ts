@@ -4,6 +4,7 @@
 export interface ChatRequest {
   query: string;
   session_id?: string | null;
+  user_id?: string | null;
   model?: string | null;
   search_depth?: string | null;
   top_k?: number | null;

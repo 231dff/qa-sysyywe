@@ -103,6 +103,35 @@ errors_total = Counter(
     registry=_METRICS_REGISTRY,
 )
 
+# ── 知识图谱 / 结构化索引指标 ──
+# 实体抽取调用总数（按状态）
+extraction_total = Counter(
+    "extraction_total",
+    "知识图谱实体抽取调用总数",
+    ["status"],  # success | failure
+    registry=_METRICS_REGISTRY,
+)
+
+# 图谱当前实体 / 关系数
+graph_entities = Gauge(
+    "graph_entities",
+    "知识图谱当前实体数",
+    registry=_METRICS_REGISTRY,
+)
+graph_relations = Gauge(
+    "graph_relations",
+    "知识图谱当前关系数",
+    registry=_METRICS_REGISTRY,
+)
+
+# graph_search 查询延迟
+graph_search_duration_seconds = Histogram(
+    "graph_search_duration_seconds",
+    "知识图谱检索延迟 (秒)",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+    registry=_METRICS_REGISTRY,
+)
+
 
 # ============================================================
 # 滑动窗口可用性统计 (95% SLA)
@@ -302,6 +331,22 @@ def record_llm_call(operation: str, duration: float) -> None:
 def record_error(error_type: str) -> None:
     """记录错误事件"""
     errors_total.labels(type=error_type).inc()
+
+
+def record_extraction(status: str) -> None:
+    """记录一次实体抽取（status: success | failure）"""
+    extraction_total.labels(status=status).inc()
+
+
+def update_graph_size(entities: int, relations: int) -> None:
+    """更新知识图谱实体/关系数 Gauge"""
+    graph_entities.set(entities)
+    graph_relations.set(relations)
+
+
+def record_graph_search(duration: float) -> None:
+    """记录一次 graph_search 查询延迟（秒）"""
+    graph_search_duration_seconds.observe(duration)
 
 
 def update_active_sessions(count: int) -> None:

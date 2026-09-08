@@ -2,13 +2,14 @@
 
 // 智能搜索助手 — 聊天状态管理 Provider
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
-import type { ChatMessage, UserSettings, SourceInfo, DoneEvent } from "../lib/types";
+import type { ChatMessage, UserSettings } from "../lib/types";
 import { useSSE } from "../hooks/useSSE";
-import { generateSessionId } from "../lib/api";
+import { generateSessionId, getOrCreateUserId } from "../lib/api";
 
 interface ChatContextType {
   messages: ChatMessage[];
   sessionId: string;
+  userId: string;
   settings: UserSettings;
   stats: { totalQueries: number; totalTokens: number };
   // SSE 状态
@@ -36,6 +37,7 @@ export default function ChatProvider({
   children: React.ReactNode;
 }) {
   const [sessionId, setSessionId] = useState<string>(generateSessionId);
+  const [userId] = useState<string>(getOrCreateUserId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const [stats, setStats] = useState({ totalQueries: 0, totalTokens: 0 });
@@ -72,12 +74,13 @@ export default function ChatProvider({
       await sse.startStream({
         query: content,
         session_id: sessionId,
+        user_id: userId,
         model: settings.model,
         search_depth: settings.searchDepth,
         top_k: settings.topK,
       });
     },
-    [sessionId, settings, sse]
+    [sessionId, userId, settings, sse]
   );
 
   // 监听 SSE 状态变化 — 仅在 done/error 时将助手消息加入 messages（只加一次）
@@ -108,13 +111,15 @@ export default function ChatProvider({
     } else if (sse.status !== "done" && sse.status !== "error") {
       doneRef.current = false; // 新请求开始时重置
     }
-  }, [sse.status]); // 只监听 status 变化，不依赖 tokens/sources（否则会触发多次）
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只监听 status 变化；tokens/sources/meta 在 done 时已定格，纳入依赖会触发重复添加
+  }, [sse.status]);
 
   return (
     <ChatContext.Provider
       value={{
         messages,
         sessionId,
+        userId,
         settings,
         stats,
         sse,

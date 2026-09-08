@@ -14,7 +14,7 @@ import json
 import time
 from typing import Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
@@ -92,13 +92,27 @@ class ReactAgent:
 
     # ── 内部：历史 dict → BaseMessage（分层压缩，前缀稳定） ──
     @staticmethod
-    def _to_messages(history: Optional[list[dict[str, str]]]) -> list[BaseMessage]:
-        """将 {role, content} 历史转换为 LangChain 消息列表，并对远期历史做分层压缩"""
+    def _to_messages(
+        history: Optional[list[dict[str, str]]] = None,
+        memory_context: Optional[str] = None,
+    ) -> list[BaseMessage]:
+        """
+        将 {role, content} 历史转换为 LangChain 消息列表，并对远期历史做分层压缩。
+        - role 支持 system：置于消息最前（记忆上下文注入点）
+        - 当传入 memory_context 时，作为 system 消息前缀注入（仅在 history 前）
+        """
         if not history:
-            return []
+            # 仅有记忆上下文、无历史时，也要产出 system 消息
+            messages: list[BaseMessage] = []
+            if memory_context:
+                messages.append(SystemMessage(content=memory_context))
+            return messages
         # 分层压缩：控制跨轮 token 与 KV 占用
         compressed = compress_history(history)
         messages: list[BaseMessage] = []
+        # 记忆上下文作为前缀 system 消息，顺序固定以命中 prompt cache
+        if memory_context:
+            messages.append(SystemMessage(content=memory_context))
         for msg in compressed:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -106,6 +120,8 @@ class ReactAgent:
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
                 messages.append(AIMessage(content=content))
+            elif role == "system":
+                messages.append(SystemMessage(content=content))
         return messages
 
     # ── 内部：从结果消息中提取最终答案与来源 ──
@@ -151,6 +167,7 @@ class ReactAgent:
         self,
         user_query: str,
         history: Optional[list[dict[str, str]]] = None,
+        memory_context: Optional[str] = None,
     ) -> GeneratedAnswer:
         """
         执行一轮 ReAct 问答。
@@ -158,6 +175,7 @@ class ReactAgent:
         Args:
             user_query: 用户问题
             history: 对话历史 [{role, content}, ...]（可选）
+            memory_context: 记忆上下文文本（语义+情景记忆，可选，注入为 system 前缀）
 
         Returns:
             GeneratedAnswer
@@ -165,7 +183,7 @@ class ReactAgent:
         start = time.perf_counter()
 
         # 构建输入消息：历史 + 当前用户问题
-        input_messages = self._to_messages(history)
+        input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
 
         try:
@@ -224,12 +242,13 @@ class ReactAgent:
         self,
         user_query: str,
         history: Optional[list[dict[str, str]]] = None,
+        memory_context: Optional[str] = None,
     ):
         """
         以 astream_events (v2) 逐事件产出 ReAct 执行过程。
         供 agent/streaming.py 桥接为 SSE 事件。
         """
-        input_messages = self._to_messages(history)
+        input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
         async for event in self._graph.astream_events(
             {"messages": input_messages},

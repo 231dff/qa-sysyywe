@@ -216,7 +216,7 @@ class TestSearchAgentClass:
         """run 后应累积并裁剪历史"""
         agent = SearchAgent()
 
-        async def fake_run(query, history=None):
+        async def fake_run(query, history=None, memory_context=""):
             return GeneratedAnswer(
                 query=query, answer="回答", sources=[],
                 confidence=0.85, is_fallback=False,
@@ -240,7 +240,7 @@ class TestSearchAgentClass:
         original = cfg.max_history_turns
         cfg.max_history_turns = 1
 
-        async def fake_run(query, history=None):
+        async def fake_run(query, history=None, memory_context=""):
             return GeneratedAnswer(
                 query=query, answer="答", sources=[],
                 confidence=0.85, is_fallback=False,

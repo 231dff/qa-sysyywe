@@ -14,11 +14,10 @@ export default function MarkdownContent({
 }) {
   const [showCursor, setShowCursor] = useState(true);
 
+  // 仅负责流式期间的光标闪烁；是否显示光标由渲染处的 `isStreaming` 守卫，
+  // 无需在 effect 内同步 setState（React 19 反模式，会触发级联渲染）。
   useEffect(() => {
-    if (!isStreaming) {
-      setShowCursor(false);
-      return;
-    }
+    if (!isStreaming) return;
     const timer = setInterval(() => {
       setShowCursor((v) => !v);
     }, 500);

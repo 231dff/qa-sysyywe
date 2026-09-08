@@ -73,3 +73,19 @@ groups:
         annotations:
           summary: "Token 消耗速率异常"
           description: "15 分钟内 Token 消耗速率 {{ $value }} tokens/s，超出正常范围"
+
+      # ── 实体抽取失败率 > 20%（知识图谱建图质量劣化） ──
+      - alert: HighExtractionFailureRate
+        expr: |
+          (
+            sum(rate(extraction_total{status="failure"}[5m]))
+            /
+            sum(rate(extraction_total[5m]))
+          ) > 0.20
+        for: 5m
+        labels:
+          severity: warning
+          category: rag
+        annotations:
+          summary: "实体抽取失败率 > 20%"
+          description: "知识图谱实体抽取失败率为 {{ $value | humanizePercentage }}，结构化索引建图质量劣化，已降级为仅自然语言记忆"

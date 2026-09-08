@@ -21,6 +21,8 @@ from langchain_core.messages import ToolMessage
 
 from agent.models import GeneratedAnswer, Source
 from config import get_agent_config, get_api_config
+from memory.user_store import get_user_store
+from memory.memory_manager import get_memory_manager
 from utils.helpers import count_tokens, generate_session_id
 
 
@@ -73,6 +75,7 @@ async def run_stream_sse(
     agent,
     user_query: str,
     session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
     model_override: Optional[str] = None,
     search_depth_override: Optional[str] = None,
     top_k_override: Optional[int] = None,
@@ -96,8 +99,15 @@ async def run_stream_sse(
     if session_id is None:
         session_id = generate_session_id()
     if session_id not in agent._sessions:
-        agent._sessions[session_id] = []
+        # 先尝试从持久化存储恢复该用户的会话
+        restored = get_user_store().get_history(user_id, session_id) if user_id else []
+        agent._sessions[session_id] = restored
     history = agent._sessions[session_id]
+
+    # ── 记忆召回：语义 + 情景，注入为 system 前缀 ──
+    memory = get_memory_manager()
+    memory_ctx = memory.recall(user_id, user_query)
+    memory_context = memory_ctx.render() if user_id else ""
 
     start = time.perf_counter()
 
@@ -111,7 +121,7 @@ async def run_stream_sse(
         sources: list[Source] = []
         used_search = False
 
-        async for event in agent._react.astream_events(user_query, history):
+        async for event in agent._react.astream_events(user_query, history, memory_context=memory_context):
             kind = event.get("event", "")
             data = event.get("data", {})
 
@@ -201,6 +211,13 @@ async def run_stream_sse(
             agent._sessions[session_id] = history[-(max_turns * 2):]
         else:
             agent._sessions[session_id] = history
+
+        # ── 持久化到用户存储（跨进程/重启恢复） ──
+        if user_id:
+            get_user_store().set_history(user_id, session_id, agent._sessions[session_id])
+            # 记忆写回：情景 + 语义事实（异步，用 aremember 支持 LLM 兜底抽取）
+            await memory.aremember(user_id, session_id, "user", user_query)
+            await memory.aremember(user_id, session_id, "assistant", answer.answer)
 
     except Exception as exc:
         yield _sse_event(

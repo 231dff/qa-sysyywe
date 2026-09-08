@@ -1,0 +1,72 @@
+# ============================================================
+# 智能搜索助手 — CI 门禁
+#
+# 两道门禁：
+# 1. backend-evals: 跑统一评测入口（6 套件 + 门禁）+ 覆盖率报告
+# 2. frontend-checks: 类型检查 + ESLint（Next.js 16 + React 19）
+#
+# 触发：push 到 main / feat 分支，以及所有 PR
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+jobs:
+  backend-evals:
+    name: 后端评测 + 覆盖率
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 统一评测入口：离线回归(pytest) + 故障注入 + 安全审计 + 在线监控 + 检索质量 + 记忆
+      # 退出码非 0 即门禁失败；judge/probe 默认跳过（离线可跑）
+      - name: 运行企业级评测（门禁）
+        run: python -m evals
+
+      # 覆盖率：统计核心源码，阈值 70%（当前约 73%），防质量回退
+      - name: 覆盖率报告
+        run: |
+          python -m pytest --cov=agent --cov=rag --cov=memory --cov=tools --cov=utils --cov=config \
+            --cov-report=term-missing --cov-fail-under=70
+
+  frontend-checks:
+    name: 前端类型检查 + Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint

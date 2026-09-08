@@ -31,3 +31,21 @@ export async function getConfigDefaults(): Promise<ConfigDefaults> {
 export function generateSessionId(): string {
   return `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
+
+const USER_ID_KEY = "search_agent_user_id";
+
+/** 获取或创建持久化用户 ID（匿名 UUID，存 localStorage，刷新/重开不丢失）。
+ *  无登录系统的匿名身份，用于跨会话记忆归属。 */
+export function getOrCreateUserId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = window.localStorage.getItem(USER_ID_KEY);
+    if (!id) {
+      id = `u_${crypto.randomUUID()}`;
+      window.localStorage.setItem(USER_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return "";
+  }
+}
