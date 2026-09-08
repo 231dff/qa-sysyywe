@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="banner.png" alt="智能搜索助手 — QA-SYS" width="100%" />
+  <img src="banner.png" alt="智能搜索助手 — 自主决策搜索 Agent 系统" width="100%" />
 </p>
+
+<!-- 封面横幅由 banner.html（diagram-design 源文件）渲染，改封面请编辑 banner.html 后用 headless Chrome 重新导出 banner.png -->
 
 <p align="center">
   <a href="https://github.com/231dff/qa-sysyywe"><img src="https://img.shields.io/badge/GitHub-231dff%2Fqa--sysyywe-181717?logo=github" alt="GitHub Repo"></a>
