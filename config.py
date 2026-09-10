@@ -123,6 +123,44 @@ class APIConfig(BaseSettings):
 
 
 # ============================================================
+# TencentDB-Agent-Memory（TDAI）可选外部记忆侧车
+# ============================================================
+class TdaiConfig(BaseSettings):
+    """TencentDB-Agent-Memory 独立 Gateway 连接配置（可选增强记忆）。
+
+    TencentDB-Agent-Memory 是 Node 侧的分层长期记忆侧车（L0 对话 → L1 原子事实
+    → L2 场景 → L3 人设），暴露纯 HTTP 端点，可脱离 OpenClaw 独立运行。
+
+    通过 TDAI_ENABLED 开启后，记忆召回/写回可切换到该侧车；未开启（默认）时，
+    本项目沿用自研 FactStore + EpisodicStore，行为完全不变。
+    """
+
+    tdai_enabled: bool = Field(
+        default=False,
+        description="是否启用 TencentDB-Agent-Memory 分层记忆侧车",
+    )
+    tdai_gateway_url: str = Field(
+        default="http://127.0.0.1:8420",
+        description="TDAI Gateway 基地址（不含路径）",
+    )
+    tdai_api_key: str = Field(
+        default="",
+        description="TDAI Gateway 鉴权 Bearer Key（与 TDAI_GATEWAY_API_KEY 对齐，空=无鉴权）",
+    )
+    tdai_timeout: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="TDAI Gateway 单次请求超时（秒）",
+    )
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+
+# ============================================================
 # Agent 行为配置
 # ============================================================
 class AgentConfig:
@@ -167,6 +205,7 @@ class AgentConfig:
 # ============================================================
 _api_config: Optional[APIConfig] = None
 _agent_config: Optional[AgentConfig] = None
+_tdai_config: Optional[TdaiConfig] = None
 
 
 def get_api_config() -> APIConfig:
@@ -183,6 +222,14 @@ def get_agent_config() -> AgentConfig:
     if _agent_config is None:
         _agent_config = AgentConfig()
     return _agent_config
+
+
+def get_tdai_config() -> TdaiConfig:
+    """获取 TencentDB-Agent-Memory 配置单例"""
+    global _tdai_config
+    if _tdai_config is None:
+        _tdai_config = TdaiConfig()
+    return _tdai_config
 
 
 def resolve_llm_connection() -> dict:

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "智能搜索助手 · 自主决策搜索 Agent 系统",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1280, 540]
+  },
+  "components": [
+    { "id": "frontend", "type": "frontend", "label": "Next.js 16 前端", "sublabel": "React 19 · App Router", "pos": [40, 160], "size": [150, 60] },
+    { "id": "backend", "type": "backend", "label": "FastAPI 后端", "sublabel": "SSE · REST · :8000", "pos": [260, 160], "size": [150, 60] },
+    { "id": "agent", "type": "backend", "label": "LangGraph ReAct Agent", "sublabel": "自主决策 · 按需取数", "pos": [480, 150], "size": [200, 72] },
+    { "id": "llm", "type": "external", "label": "LLM API", "sublabel": "OpenAI 兼容 · Qwen/DeepSeek", "pos": [820, 40], "size": [180, 62] },
+    { "id": "tavily", "type": "external", "label": "Tavily 搜索", "sublabel": "实时联网检索", "pos": [820, 170], "size": [180, 62] },
+    { "id": "observability", "type": "cloud", "label": "Prometheus + Grafana", "sublabel": "95% SLA · 告警", "pos": [260, 440], "size": [180, 62] },
+    { "id": "knowledge", "type": "database", "label": "RAG 知识库", "sublabel": "混合检索 · 时效治理", "pos": [470, 440], "size": [150, 62] },
+    { "id": "graph", "type": "database", "label": "知识图谱", "sublabel": "多跳推理 · 消歧", "pos": [650, 440], "size": [150, 62] },
+    { "id": "memory", "type": "database", "label": "跨会话记忆", "sublabel": "语义 + 情景", "pos": [830, 440], "size": [150, 62] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "自托管服务", "wraps": ["backend", "agent", "observability", "knowledge", "graph", "memory"], "pad": 24 }
+  ],
+  "connections": [
+    { "from": "frontend", "to": "backend", "label": "SSE", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "backend", "to": "agent", "label": "ReAct 编排", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "agent", "to": "llm", "label": "streaming POST", "variant": "emphasis", "fromSide": "top", "toSide": "left" },
+    { "from": "agent", "to": "tavily", "label": "search", "fromSide": "right", "toSide": "left" },
+    { "from": "agent", "to": "knowledge", "label": "knowledge_search", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "graph", "label": "graph_search", "fromSide": "bottom", "toSide": "top" },
+    { "from": "agent", "to": "memory", "label": "remember / recall", "fromSide": "bottom", "toSide": "top" },
+    { "from": "backend", "to": "observability", "label": "metrics 抓取", "variant": "dashed", "fromSide": "bottom", "toSide": "top" }
+  ]
+}

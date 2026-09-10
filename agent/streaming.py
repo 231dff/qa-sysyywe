@@ -20,9 +20,10 @@ from typing import AsyncGenerator, Optional
 from langchain_core.messages import ToolMessage
 
 from agent.models import GeneratedAnswer, Source
-from config import get_agent_config, get_api_config
+from config import get_agent_config, get_api_config, get_tdai_config
 from memory.user_store import get_user_store
 from memory.memory_manager import get_memory_manager
+from memory.tdai_adapter import get_tdai_adapter
 from utils.helpers import count_tokens, generate_session_id
 
 
@@ -89,6 +90,7 @@ async def run_stream_sse(
     """
     agent_cfg = get_agent_config()
     api_cfg = get_api_config()
+    tdai_cfg = get_tdai_config()
 
     # ── 运行时配置覆盖（与旧实现语义一致） ──
     orig_model = api_cfg.llm_model
@@ -104,10 +106,16 @@ async def run_stream_sse(
         agent._sessions[session_id] = restored
     history = agent._sessions[session_id]
 
-    # ── 记忆召回：语义 + 情景，注入为 system 前缀 ──
-    memory = get_memory_manager()
-    memory_ctx = memory.recall(user_id, user_query)
-    memory_context = memory_ctx.render() if user_id else ""
+    # ── 记忆召回：语义 + 情景（或 TDAI 分层长期记忆），注入为 system 前缀 ──
+    if tdai_cfg.tdai_enabled:
+        # TDAI 优先：L0→L3 分层记忆召回；Gateway 不可用/无结果时回退自研，避免记忆真空
+        memory_context = await get_tdai_adapter().recall(user_id, session_id, user_query)
+        if not memory_context:
+            memory_ctx = get_memory_manager().recall(user_id, user_query)
+            memory_context = memory_ctx.render() if user_id else ""
+    else:
+        memory_ctx = get_memory_manager().recall(user_id, user_query)
+        memory_context = memory_ctx.render() if user_id else ""
 
     start = time.perf_counter()
 
@@ -215,9 +223,18 @@ async def run_stream_sse(
         # ── 持久化到用户存储（跨进程/重启恢复） ──
         if user_id:
             get_user_store().set_history(user_id, session_id, agent._sessions[session_id])
-            # 记忆写回：情景 + 语义事实（异步，用 aremember 支持 LLM 兜底抽取）
-            await memory.aremember(user_id, session_id, "user", user_query)
-            await memory.aremember(user_id, session_id, "assistant", answer.answer)
+            # 记忆写回：TDAI 侧车为一轮 capture；自研为分开的 aremember（情景 + 语义事实）
+            if tdai_cfg.tdai_enabled:
+                captured = await get_tdai_adapter().capture(
+                    user_id, session_id, user_query, answer.answer
+                )
+                if not captured:
+                    # Gateway 捕获失败 → 回退自研，避免记忆丢失
+                    await get_memory_manager().aremember(user_id, session_id, "user", user_query)
+                    await get_memory_manager().aremember(user_id, session_id, "assistant", answer.answer)
+            else:
+                await get_memory_manager().aremember(user_id, session_id, "user", user_query)
+                await get_memory_manager().aremember(user_id, session_id, "assistant", answer.answer)
 
     except Exception as exc:
         yield _sse_event(

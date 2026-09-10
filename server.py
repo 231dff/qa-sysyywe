@@ -21,9 +21,10 @@ from typing import Optional
 
 from agent.graph import SearchAgent
 from agent.streaming import run_stream_sse
-from config import get_api_config, get_agent_config
+from config import get_api_config, get_agent_config, get_tdai_config
 from memory.session_store import get_session_store
 from memory.memory_manager import get_memory_manager
+from memory.tdai_adapter import get_tdai_adapter
 from utils.helpers import generate_session_id
 from utils.http_client import set_shared_client, reset_shared_client
 from utils.metrics import (
@@ -245,6 +246,43 @@ async def clear_memory(user_id: str):
     mm.facts.clear_user(user_id)
     mm.episodes.clear_user(user_id)
     return {"ok": True, "user_id": user_id}
+
+
+@app.get("/api/memory/tdai/{user_id}")
+async def get_tdai_memory(user_id: str, query: Optional[str] = None, limit: int = 10):
+    """观测 TencentDB-Agent-Memory 侧车的分层记忆（L1 记忆 + L0 对话）。
+
+    返回侧车健康状态，以及可选的定向检索结果（L1 原子事实/场景 + L0 原始对话）。
+
+    注意：TDAI Gateway 的 /search/memories 与 /search/conversations 为**全局检索**，
+    不按 user_id 过滤（user_id 仅作用于 recall/capture 的 L3 人设隔离）。此端点的
+    user_id 仅作语义归属标记，检索结果面向全局；`query` 用于定向检索，缺省时不检索。
+    """
+    tdai_cfg = get_tdai_config()
+    if not tdai_cfg.tdai_enabled:
+        return {
+            "user_id": user_id,
+            "enabled": False,
+            "message": "TDAI 未启用（TDAI_ENABLED=false），无侧车记忆可观测",
+        }
+
+    adapter = get_tdai_adapter()
+    healthy = await adapter.health()
+
+    query = (query or "").strip()
+    limit = max(1, min(limit, 100))
+
+    memories = await adapter.search_memories(query, limit=limit) if query else {}
+    conversations = await adapter.search_conversations(query, limit=limit) if query else {}
+
+    return {
+        "user_id": user_id,
+        "enabled": True,
+        "gateway_healthy": healthy,
+        "query": query,
+        "memories": memories,              # L1 原子事实/场景（全局检索）
+        "conversations": conversations,    # L0 原始对话（全局检索）
+    }
 
 
 # ============================================================
