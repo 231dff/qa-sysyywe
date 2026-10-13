@@ -23,6 +23,7 @@ from agent.graph import SearchAgent
 from agent.streaming import run_stream_sse
 from config import get_api_config, get_agent_config, get_tdai_config
 from memory.session_store import get_session_store
+from memory.user_store import get_user_store          # 新增
 from memory.memory_manager import get_memory_manager
 from memory.tdai_adapter import get_tdai_adapter
 from utils.helpers import generate_session_id
@@ -51,7 +52,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
-        "http://frontend:3000",   # Docker 内部网络
+        "http://frontend:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -59,7 +60,6 @@ app.add_middleware(
 )
 
 
-# ── HTTP 指标中间件: 记录所有请求的计数 / 延迟 / 状态码 ──
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     """Prometheus 指标中间件: 记录每个请求的延迟与结果"""
@@ -77,7 +77,6 @@ async def metrics_middleware(request: Request, call_next):
     finally:
         duration = time.perf_counter() - start
         path = request.url.path
-        # 跳过 /metrics 自身以避免递归
         if path != "/api/metrics":
             record_http_request(
                 method=request.method,
@@ -88,7 +87,6 @@ async def metrics_middleware(request: Request, call_next):
             )
 
 
-# ── 生命周期: 共享 HTTP 客户端 (连接池复用, 消除 TCP/TLS 握手延迟) ──
 @app.on_event("startup")
 async def startup():
     """创建全局 httpx AsyncClient，复用 TCP 连接池"""
@@ -173,7 +171,6 @@ async def chat_stream(req: ChatRequest, request: Request):
             search_depth_override=req.search_depth,
             top_k_override=req.top_k,
         ):
-            # 客户端断开时停止
             if await request.is_disconnected():
                 disconnected = True
                 break
@@ -199,27 +196,78 @@ async def chat_stream(req: ChatRequest, request: Request):
 # ============================================================
 # 会话管理端点
 # ============================================================
+
+# 新增：会话列表（供前端侧边栏使用）
+@app.get("/api/sessions")
+async def list_sessions(user_id: str = ""):
+    """返回该用户的所有会话，按消息数量降序排列"""
+    if not user_id:
+        return {"user_id": "", "sessions": []}
+
+    store = get_user_store()
+    sids = store.list_sessions(user_id)
+
+    result = []
+    for sid in sids:
+        history = store.get_history(user_id, sid)
+        if not history:
+            continue
+
+        # 取第一条 user 消息作为标题
+        title = "新对话"
+        for msg in history:
+            if msg.get("role") == "user":
+                title = msg["content"][:30]
+                break
+
+        # 取最后一条消息作为预览
+        last_msg = history[-1] if history else {}
+
+        result.append({
+            "session_id": sid,
+            "title": title,
+            "preview": last_msg.get("content", "")[:60],
+            "message_count": len(history),
+        })
+
+    result.sort(key=lambda x: x["message_count"], reverse=True)
+    return {"user_id": user_id, "sessions": result}
+
+
+# 修改：支持 user_id 查询（优先从 UserStore 读）
 @app.get("/api/session/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user_id: Optional[str] = None):
+    # 优先从 UserStore（持久化，按 user_id 隔离）
+    if user_id:
+        store = get_user_store()
+        history = store.get_history(user_id, session_id)
+        if history:
+            return SessionInfo(session_id=session_id, history=history, active=False)
+
+    # 回退到内存中的 SearchAgent
     agent = get_agent()
     history = agent.get_history(session_id)
     active = session_id in agent._sessions
     return SessionInfo(session_id=session_id, history=history, active=active)
 
 
+# 修改：删除时同时清 UserStore
 @app.delete("/api/session/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, user_id: Optional[str] = None):
+    if user_id:
+        store = get_user_store()
+        store.delete_session(user_id, session_id)
+
     agent = get_agent()
     agent.clear_session(session_id)
     return {"ok": True}
 
 
 # ============================================================
-# 记忆端点（user_id 贯穿的语义 + 情景记忆观测）
+# 记忆端点
 # ============================================================
 @app.get("/api/memory/{user_id}")
 async def get_memory(user_id: str):
-    """查看某用户当前的长期事实与情景记忆片段（观测/调试用）。"""
     mm = get_memory_manager()
     facts = mm.facts.get_facts(user_id)
     episodes = _list_episodes(mm, user_id)
@@ -233,7 +281,6 @@ async def get_memory(user_id: str):
 
 
 def _list_episodes(mm, user_id: str) -> list[dict]:
-    """返回该用户全部情景片段（最近在前），供观测端点使用。"""
     rec = mm.episodes._users.get(user_id)
     eps = list(rec.get("episodes", [])) if rec else []
     return list(reversed(eps))
@@ -241,7 +288,6 @@ def _list_episodes(mm, user_id: str) -> list[dict]:
 
 @app.delete("/api/memory/{user_id}")
 async def clear_memory(user_id: str):
-    """清空某用户的语义 + 情景记忆（不删会话历史）。"""
     mm = get_memory_manager()
     mm.facts.clear_user(user_id)
     mm.episodes.clear_user(user_id)
@@ -250,14 +296,6 @@ async def clear_memory(user_id: str):
 
 @app.get("/api/memory/tdai/{user_id}")
 async def get_tdai_memory(user_id: str, query: Optional[str] = None, limit: int = 10):
-    """观测 TencentDB-Agent-Memory 侧车的分层记忆（L1 记忆 + L0 对话）。
-
-    返回侧车健康状态，以及可选的定向检索结果（L1 原子事实/场景 + L0 原始对话）。
-
-    注意：TDAI Gateway 的 /search/memories 与 /search/conversations 为**全局检索**，
-    不按 user_id 过滤（user_id 仅作用于 recall/capture 的 L3 人设隔离）。此端点的
-    user_id 仅作语义归属标记，检索结果面向全局；`query` 用于定向检索，缺省时不检索。
-    """
     tdai_cfg = get_tdai_config()
     if not tdai_cfg.tdai_enabled:
         return {
@@ -280,8 +318,8 @@ async def get_tdai_memory(user_id: str, query: Optional[str] = None, limit: int 
         "enabled": True,
         "gateway_healthy": healthy,
         "query": query,
-        "memories": memories,              # L1 原子事实/场景（全局检索）
-        "conversations": conversations,    # L0 原始对话（全局检索）
+        "memories": memories,
+        "conversations": conversations,
     }
 
 
@@ -308,10 +346,7 @@ async def health():
     agent = get_agent()
     active = len(agent._sessions)
     update_active_sessions(active)
-    return HealthResponse(
-        status="ok",
-        active_sessions=active,
-    )
+    return HealthResponse(status="ok", active_sessions=active)
 
 
 # ============================================================
@@ -319,20 +354,12 @@ async def health():
 # ============================================================
 @app.get("/api/metrics")
 async def metrics(format: Optional[str] = None):
-    """
-    可观测性端点: 返回 Prometheus 文本格式指标或 JSON 可用性统计。
-
-    - 默认 (Accept: text/plain 或无 format) → Prometheus 文本格式
-    - ?format=json → JSON 格式 (含可用性统计 + 指标快照)
-    - ?format=availability → 仅可用性统计 (95% SLA)
-    """
     if format == "json":
         return JSONResponse(content=get_all_stats())
     if format == "availability":
         from utils.metrics import get_availability_stats
         return JSONResponse(content=get_availability_stats())
 
-    # 默认返回 Prometheus 文本格式
     return Response(
         content=get_metrics_text(),
         media_type="text/plain; charset=utf-8",

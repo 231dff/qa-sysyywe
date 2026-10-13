@@ -2,9 +2,9 @@
 
 // 智能搜索助手 — 聊天状态管理 Provider
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
-import type { ChatMessage, UserSettings } from "../lib/types";
+import type { ChatMessage, UserSettings, SessionSummary } from "../lib/types";
 import { useSSE } from "../hooks/useSSE";
-import { generateSessionId, getOrCreateUserId } from "../lib/api";
+import { generateSessionId, getOrCreateUserId, getSessions, getSession, deleteSession as apiDeleteSession } from "../lib/api";
 
 interface ChatContextType {
   messages: ChatMessage[];
@@ -12,6 +12,9 @@ interface ChatContextType {
   userId: string;
   settings: UserSettings;
   stats: { totalQueries: number; totalTokens: number };
+  // 会话列表
+  sessions: SessionSummary[];
+  sessionsLoading: boolean;
   // SSE 状态
   sse: ReturnType<typeof useSSE>;
   // 操作
@@ -19,6 +22,10 @@ interface ChatContextType {
   clearHistory: () => void;
   newSession: () => void;
   updateSettings: (s: Partial<UserSettings>) => void;
+  // 会话管理
+  refreshSessions: () => Promise<void>;
+  switchSession: (sid: string) => Promise<void>;
+  removeSession: (sid: string) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | null>(null);
@@ -37,12 +44,78 @@ export default function ChatProvider({
   children: React.ReactNode;
 }) {
   const [sessionId, setSessionId] = useState<string>(generateSessionId);
-  const [userId] = useState<string>(getOrCreateUserId);
+  const [userId, setUserId] = useState<string>("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const [stats, setStats] = useState({ totalQueries: 0, totalTokens: 0 });
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const sse = useSSE();
   const msgCounter = useRef(0);
+
+  // 首次挂载时初始化 userId
+  useEffect(() => {
+    setUserId(getOrCreateUserId());
+  }, []);
+
+  // ── 加载会话列表 ──
+  const refreshSessions = useCallback(async () => {
+    if (!userId) return;
+    setSessionsLoading(true);
+    try {
+      const data = await getSessions(userId);
+      setSessions(data.sessions || []);
+    } catch (e) {
+      console.error("加载会话列表失败", e);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId) refreshSessions();
+  }, [userId, refreshSessions]);
+
+  // ── 切换会话 ──
+  const switchSession = useCallback(
+    async (sid: string) => {
+      if (!userId) return;
+      try {
+        const info = await getSession(sid, userId);
+        const history: ChatMessage[] = (info.history || []).map(
+          (m, i) => ({
+            id: `h_${i}`,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+          })
+        );
+        setMessages(history);
+        setSessionId(sid);
+        sse.reset();
+      } catch (e) {
+        console.error("切换会话失败", e);
+      }
+    },
+    [userId, sse]
+  );
+
+  // ── 删除会话 ──
+  const removeSession = useCallback(
+    async (sid: string) => {
+      if (!userId) return;
+      try {
+        await apiDeleteSession(sid, userId);
+        if (sid === sessionId) {
+          setMessages([]);
+          setSessionId(generateSessionId());
+        }
+        await refreshSessions();
+      } catch (e) {
+        console.error("删除会话失败", e);
+      }
+    },
+    [userId, sessionId, refreshSessions]
+  );
 
   const clearHistory = useCallback(() => {
     setMessages([]);
@@ -61,7 +134,7 @@ export default function ChatProvider({
 
   const sendMessage = useCallback(
     async (content: string) => {
-      if (!content.trim()) return;
+      if (!content.trim() || !userId) return;
 
       const userMsg: ChatMessage = {
         id: `u_${msgCounter.current++}`,
@@ -70,7 +143,6 @@ export default function ChatProvider({
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      // 启动 SSE
       await sse.startStream({
         query: content,
         session_id: sessionId,
@@ -83,7 +155,7 @@ export default function ChatProvider({
     [sessionId, userId, settings, sse]
   );
 
-  // 监听 SSE 状态变化 — 仅在 done/error 时将助手消息加入 messages（只加一次）
+  // 监听 SSE 状态变化
   const doneRef = useRef(false);
   useEffect(() => {
     if (sse.status === "done" && !doneRef.current && sse.meta) {
@@ -100,6 +172,8 @@ export default function ChatProvider({
         totalQueries: prev.totalQueries + 1,
         totalTokens: prev.totalTokens + (sse.meta?.tokens_used ?? 0),
       }));
+      // 消息完成后刷新侧边栏
+      refreshSessions();
     } else if (sse.status === "error" && sse.error) {
       const errorMsg: ChatMessage = {
         id: `e_${msgCounter.current++}`,
@@ -107,11 +181,11 @@ export default function ChatProvider({
         content: `❌ 错误: ${sse.error}`,
       };
       setMessages((prev) => [...prev, errorMsg]);
-      sse.reset(); // 清除错误状态
+      sse.reset();
     } else if (sse.status !== "done" && sse.status !== "error") {
-      doneRef.current = false; // 新请求开始时重置
+      doneRef.current = false;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只监听 status 变化；tokens/sources/meta 在 done 时已定格，纳入依赖会触发重复添加
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sse.status]);
 
   return (
@@ -122,11 +196,16 @@ export default function ChatProvider({
         userId,
         settings,
         stats,
+        sessions,
+        sessionsLoading,
         sse,
         sendMessage,
         clearHistory,
         newSession,
         updateSettings,
+        refreshSessions,
+        switchSession,
+        removeSession,
       }}
     >
       {children}

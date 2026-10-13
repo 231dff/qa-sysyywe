@@ -90,3 +90,16 @@ export interface UserSettings {
   searchDepth: string;
   topK: number;
 }
+/** 会话摘要（侧边栏列表用） */
+export interface SessionSummary {
+  session_id: string;
+  title: string;
+  preview: string;
+  message_count: number;
+}
+
+/** 会话列表响应 */
+export interface SessionListResponse {
+  user_id: string;
+  sessions: SessionSummary[];
+}

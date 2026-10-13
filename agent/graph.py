@@ -90,8 +90,13 @@ class SearchAgent:
             if memory_context:
                 print(f"[Agent] 记忆注入: {len(memory_ctx.facts)} 事实 / {len(memory_ctx.episodes)} 情景片段")
 
-        # 委托 ReactAgent 执行单轮
-        final_answer = await self._react.run(user_query, history, memory_context=memory_context)
+        # 委托 ReactAgent 执行单轮（★ 传入 user_id）
+        final_answer = await self._react.run(
+            user_query,
+            history,
+            memory_context=memory_context,
+            user_id=user_id,
+        )
 
         # 更新对话历史
         history.append({"role": "user", "content": user_query})

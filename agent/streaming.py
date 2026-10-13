@@ -108,7 +108,6 @@ async def run_stream_sse(
 
     # ── 记忆召回：语义 + 情景（或 TDAI 分层长期记忆），注入为 system 前缀 ──
     if tdai_cfg.tdai_enabled:
-        # TDAI 优先：L0→L3 分层记忆召回；Gateway 不可用/无结果时回退自研，避免记忆真空
         memory_context = await get_tdai_adapter().recall(user_id, session_id, user_query)
         if not memory_context:
             memory_ctx = get_memory_manager().recall(user_id, user_query)
@@ -129,13 +128,18 @@ async def run_stream_sse(
         sources: list[Source] = []
         used_search = False
 
-        async for event in agent._react.astream_events(user_query, history, memory_context=memory_context):
+        # ★ 传入 user_id，供 history_search 工具识别用户
+        async for event in agent._react.astream_events(
+            user_query,
+            history,
+            memory_context=memory_context,
+            user_id=user_id,
+        ):
             kind = event.get("event", "")
             data = event.get("data", {})
 
             if kind == "on_chat_model_stream":
                 chunk = data.get("chunk")
-                # 工具调用回合会携带 tool_call_chunks，其文本是「思考」而非最终答案
                 if getattr(chunk, "tool_call_chunks", None):
                     continue
                 text = getattr(chunk, "content", "")
@@ -147,7 +151,6 @@ async def run_stream_sse(
                 name = event.get("name", "")
                 if "search" in name:
                     used_search = True
-                    # 丢弃工具调用前可能残留的思考文本
                     answer_text = ""
                     tool_input = data.get("input", {}) or {}
                     q = tool_input.get("query", "") or ""
@@ -158,7 +161,6 @@ async def run_stream_sse(
 
             elif kind == "on_tool_end":
                 new_sources = _extract_sources_from_tool_output(data.get("output"))
-                # 合并去重
                 existing = {s.url for s in sources}
                 for s in new_sources:
                     if s.url not in existing:
@@ -169,7 +171,6 @@ async def run_stream_sse(
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         if not answer_text:
-            # 模型未产出有效文本 → 降级
             fallback_text = await agent._react._fallback(
                 user_query, history, start, confidence=0.5
             )
@@ -223,13 +224,11 @@ async def run_stream_sse(
         # ── 持久化到用户存储（跨进程/重启恢复） ──
         if user_id:
             get_user_store().set_history(user_id, session_id, agent._sessions[session_id])
-            # 记忆写回：TDAI 侧车为一轮 capture；自研为分开的 aremember（情景 + 语义事实）
             if tdai_cfg.tdai_enabled:
                 captured = await get_tdai_adapter().capture(
                     user_id, session_id, user_query, answer.answer
                 )
                 if not captured:
-                    # Gateway 捕获失败 → 回退自研，避免记忆丢失
                     await get_memory_manager().aremember(user_id, session_id, "user", user_query)
                     await get_memory_manager().aremember(user_id, session_id, "assistant", answer.answer)
             else:

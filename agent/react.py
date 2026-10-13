@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
     AIMessage,
@@ -42,7 +44,7 @@ from utils.helpers import count_tokens
 # ============================================================
 # ReAct 系统提示
 # ============================================================
-REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用提供的工具获取信息。
+REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答用户的问题。
 
 ## 可用工具与边界
 - `search`: 实时联网搜索，用于最新新闻/股价/天气等**时效性互联网信息**
@@ -70,8 +72,8 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
 3. **诚实**: 结果不足时明确说明，不要编造
 4. **逐条呈现**: 用简短的要点列表，每条 1-2 句话
 5. **时效提示**: 涉及实时信息时注明时间
-6. **时间感知**: 涉及「现在几点」「今天几号」「星期几」等时间问题，**必须调用 `current_time` 工具**，不要凭记忆回答。
-7. **禁止空回复**: 任何用户输入都必须给出实质性回答。**禁止回复「我是一个...」「请提出您的问题」「我已理解你的角色设定」这类话术**。用户问什么，就直接回答什么。
+6. **时间感知**: 用户消息前附有「当前时间」系统提示，涉及「现在」「今天」「最近」等时效性表述，以该时间为准。
+7. **直接回答**: 收到用户问题后立即作答。只有用户主动寒暄时才简短回应。
 
 ## 输出格式要求
 - **开头**: 一句话直接回答核心问题
@@ -102,6 +104,8 @@ class ReactAgent:
             temperature=agent_cfg.react_temperature,
             streaming=True,
         )
+        # ★ 关键：prompt 用静态字符串（明确的 SystemMessage），
+        #   不再用 Callable，彻底规避 LangGraph 版本兼容问题。
         self._graph = create_react_agent(
             self._llm,
             tools=[
@@ -112,11 +116,11 @@ class ReactAgent:
                 calculator,
                 current_time,
             ],
-            prompt=REACT_SYSTEM_PROMPT,   # 静态字符串，稳定作为 system message
+            prompt=REACT_SYSTEM_PROMPT,
         )
         self._recursion_limit = agent_cfg.react_recursion_limit
 
-    # ── 内部：历史 dict → BaseMessage（分层压缩，前缀稳定） ──
+    # ── 内部：历史 dict → BaseMessage（分层压缩 + 时间注入） ──
     @staticmethod
     def _to_messages(
         history: Optional[list[dict[str, str]]] = None,
@@ -124,27 +128,40 @@ class ReactAgent:
     ) -> list[BaseMessage]:
         """
         将 {role, content} 历史转换为 LangChain 消息列表，并对远期历史做分层压缩。
-        - role 支持 system：置于消息最前（记忆上下文注入点）
-        - 当传入 memory_context 时，作为 system 消息前缀注入（仅在 history 前）
+        - memory_context 作为 system 消息前置
+        - 当前时间作为一条独立的 system 消息，追加在历史之后、用户问题之前
         """
-        if not history:
-            messages: list[BaseMessage] = []
-            if memory_context:
-                messages.append(SystemMessage(content=memory_context))
-            return messages
-        compressed = compress_history(history)
         messages: list[BaseMessage] = []
+
+        # 1) 记忆上下文（原有）
         if memory_context:
             messages.append(SystemMessage(content=memory_context))
-        for msg in compressed:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-            elif role == "system":
-                messages.append(SystemMessage(content=content))
+
+        # 2) 历史（若有）
+        if history:
+            compressed = compress_history(history)
+            for msg in compressed:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    messages.append(AIMessage(content=content))
+                elif role == "system":
+                    messages.append(SystemMessage(content=content))
+
+        # 3) ★ 时间注入：显式 SystemMessage，放在历史之后、用户问题之前
+        cfg = get_agent_config()
+        try:
+            now = datetime.now(ZoneInfo(cfg.timezone))
+            time_str = now.strftime("%Y年%m月%d日 %H:%M:%S %A")
+            messages.append(SystemMessage(
+                content=f"【当前时间】{time_str}（{cfg.timezone}）"
+            ))
+        except Exception:
+            # 时区数据库缺失时，静默跳过时间注入，不影响主流程
+            pass
+
         return messages
 
     # ── 内部：从结果消息中提取最终答案与来源 ──
@@ -192,9 +209,7 @@ class ReactAgent:
         memory_context: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> GeneratedAnswer:
-        """
-        执行一轮 ReAct 问答。
-        """
+        """执行一轮 ReAct 问答。"""
         start = time.perf_counter()
 
         # 注入当前 user_id，供 history_search 等工具通过 ContextVar 获取

@@ -1,20 +1,40 @@
 // 智能搜索助手 — API 客户端
-import type { SessionInfo, ConfigDefaults } from "./types";
+import type {
+  SessionInfo,
+  ConfigDefaults,
+  SessionListResponse,
+} from "./types";
 
 const BASE = ""; // 同域，通过 Next.js API Route 代理或 rewrites
 
-/** GET /api/session/:id — 获取会话历史 */
+/** GET /api/sessions?user_id=xxx — 获取用户的会话列表 */
+export async function getSessions(userId: string): Promise<SessionListResponse> {
+  if (!userId) return { user_id: "", sessions: [] };
+  const res = await fetch(
+    `${BASE}/api/sessions?user_id=${encodeURIComponent(userId)}`
+  );
+  if (!res.ok) throw new Error(`获取会话列表失败: ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/session/:id?user_id=xxx — 获取会话历史 */
 export async function getSession(
-  sessionId: string
+  sessionId: string,
+  userId?: string
 ): Promise<SessionInfo> {
-  const res = await fetch(`${BASE}/api/session/${sessionId}`);
+  const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+  const res = await fetch(`${BASE}/api/session/${sessionId}${qs}`);
   if (!res.ok) throw new Error(`获取会话失败: ${res.status}`);
   return res.json();
 }
 
-/** DELETE /api/session/:id — 清除会话 */
-export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/session/${sessionId}`, {
+/** DELETE /api/session/:id?user_id=xxx — 清除会话 */
+export async function deleteSession(
+  sessionId: string,
+  userId?: string
+): Promise<void> {
+  const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+  const res = await fetch(`${BASE}/api/session/${sessionId}${qs}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`删除会话失败: ${res.status}`);
@@ -34,8 +54,7 @@ export function generateSessionId(): string {
 
 const USER_ID_KEY = "search_agent_user_id";
 
-/** 获取或创建持久化用户 ID（匿名 UUID，存 localStorage，刷新/重开不丢失）。
- *  无登录系统的匿名身份，用于跨会话记忆归属。 */
+/** 获取或创建持久化用户 ID */
 export function getOrCreateUserId(): string {
   if (typeof window === "undefined") return "";
   try {
