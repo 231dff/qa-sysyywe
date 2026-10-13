@@ -18,12 +18,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
 from config import PROJECT_ROOT
+
+
+# ============================================================
+# 分词辅助（零依赖，简单切分中英文）
+# ============================================================
+_TOKEN_SPLIT_RE = re.compile(r"[\s,，。.！!？?；;：:、\-_/\\()（）\[\]【】\"'“”‘’]+")
+
+
+def _tokenize(text: str) -> set[str]:
+    """简单分词：按标点/空白切分，仅保留长度 ≥ 2 的片段。"""
+    if not text:
+        return set()
+    parts = _TOKEN_SPLIT_RE.split(text.lower())
+    return {p for p in parts if len(p) >= 2}
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -42,9 +57,7 @@ class UserStore:
 
     def __init__(self, persist_dir: Optional[Path] = None):
         self.persist_dir = str(persist_dir or PROJECT_ROOT / "data" / "sessions")
-        self._users: dict[str, dict] = {}  # user_id -> {created_at, sessions}
-        # 可重入锁：set_history 在持锁时调用同样加锁的 get_or_create，
-        # 普通 Lock 会在此自锁死锁（pytest 全量挂起的根因）。
+        self._users: dict[str, dict] = {}
         self._lock = threading.RLock()
         self._load_all()
 
@@ -65,7 +78,6 @@ class UserStore:
                     "sessions": data.get("sessions", {}),
                 }
             except (json.JSONDecodeError, OSError):
-                # 损坏文件静默跳过（对应故障注入的降级语义）
                 continue
 
     def _save(self, user_id: str) -> None:
@@ -127,6 +139,56 @@ class UserStore:
             if user:
                 user["sessions"] = {}
                 self._save(user_id)
+
+    # ── 历史检索（新增） ──
+    def search_sessions(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 5,
+        snippet_max_len: int = 500,
+    ) -> list[dict]:
+        """
+        按关键词检索用户历史会话，返回按相关性排序的 Top-K 消息片段。
+
+        策略：关键词重叠打分（零依赖、离线确定）。
+        中文按标点切分，英文按空格切分；重叠越多排名越高。
+        """
+        with self._lock:
+            user = self._users.get(user_id)
+            if user is None:
+                return []
+            sessions: dict[str, list[dict]] = dict(user.get("sessions", {}))
+
+        if not sessions:
+            return []
+
+        query_tokens = _tokenize(query)
+        if not query_tokens:
+            return []
+
+        hits: list[tuple[int, str, dict]] = []
+        for sid, msgs in sessions.items():
+            for msg in msgs:
+                content = msg.get("content", "")
+                if not content:
+                    continue
+                content_tokens = _tokenize(content)
+                overlap = len(query_tokens & content_tokens)
+                if overlap == 0:
+                    continue
+                hits.append((overlap, sid, msg))
+
+        hits.sort(key=lambda x: x[0], reverse=True)
+
+        return [
+            {
+                "session_id": sid,
+                "role": msg.get("role", ""),
+                "content": msg.get("content", "")[:snippet_max_len],
+            }
+            for _, sid, msg in hits[:top_k]
+        ]
 
 
 # 全局单例

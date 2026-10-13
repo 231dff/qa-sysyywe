@@ -14,12 +14,26 @@ import json
 import time
 from typing import Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from agent.models import GeneratedAnswer, Source
-from agent.tools import calculator, current_time, graph_search, knowledge_search, search
+from agent.tools import (
+    calculator,
+    current_time,
+    graph_search,
+    history_search,
+    knowledge_search,
+    search,
+    set_current_user_id,
+)
 from config import get_agent_config, get_api_config, resolve_llm_connection
 from tools.registry import generate_fallback_answer
 from utils.context import compress_history
@@ -34,6 +48,7 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
 - `search`: 实时联网搜索，用于最新新闻/股价/天气等**时效性互联网信息**
 - `knowledge_search`: 本地知识库检索，用于**内部文档/制度/历史决策**等沉淀知识
 - `graph_search`: 知识图谱检索，用于需要**多跳推理/精确消歧**的垂直场景（医疗、法律、家族/组织关系等）
+- `history_search`: 检索用户**过往会话**，用于「我上次问过什么」「之前我们讨论过什么」等回忆类问题
 - `calculator`: 精确数值计算
 - `current_time`: 获取当前时间
 
@@ -42,7 +57,9 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
    - 最新/时效性信息 → `search`
    - 内部文档/沉淀知识 → `knowledge_search`
    - 多跳关系推理/实体消歧 → `graph_search`
-   - 精确计算 → `calculator`；需要当前时间 → `current_time`
+   - 回忆过往对话/历史提问 → `history_search`
+   - 精确计算 → `calculator`
+   - 询问当前时间/日期 → `current_time`
    - 常识/翻译/逻辑推理等 → 直接作答，不调工具
 2. **按需多次调用**：一次结果不足可换更精确的查询词再次调用
 3. **自主停止**：信息充分后立即停止调用工具，直接给出最终答案
@@ -53,6 +70,8 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手。你可以使用�
 3. **诚实**: 结果不足时明确说明，不要编造
 4. **逐条呈现**: 用简短的要点列表，每条 1-2 句话
 5. **时效提示**: 涉及实时信息时注明时间
+6. **时间感知**: 涉及「现在几点」「今天几号」「星期几」等时间问题，**必须调用 `current_time` 工具**，不要凭记忆回答。
+7. **禁止空回复**: 任何用户输入都必须给出实质性回答。**禁止回复「我是一个...」「请提出您的问题」「我已理解你的角色设定」这类话术**。用户问什么，就直接回答什么。
 
 ## 输出格式要求
 - **开头**: 一句话直接回答核心问题
@@ -85,8 +104,15 @@ class ReactAgent:
         )
         self._graph = create_react_agent(
             self._llm,
-            tools=[search, knowledge_search, graph_search, calculator, current_time],
-            prompt=REACT_SYSTEM_PROMPT,
+            tools=[
+                search,
+                knowledge_search,
+                graph_search,
+                history_search,
+                calculator,
+                current_time,
+            ],
+            prompt=REACT_SYSTEM_PROMPT,   # 静态字符串，稳定作为 system message
         )
         self._recursion_limit = agent_cfg.react_recursion_limit
 
@@ -102,15 +128,12 @@ class ReactAgent:
         - 当传入 memory_context 时，作为 system 消息前缀注入（仅在 history 前）
         """
         if not history:
-            # 仅有记忆上下文、无历史时，也要产出 system 消息
             messages: list[BaseMessage] = []
             if memory_context:
                 messages.append(SystemMessage(content=memory_context))
             return messages
-        # 分层压缩：控制跨轮 token 与 KV 占用
         compressed = compress_history(history)
         messages: list[BaseMessage] = []
-        # 记忆上下文作为前缀 system 消息，顺序固定以命中 prompt cache
         if memory_context:
             messages.append(SystemMessage(content=memory_context))
         for msg in compressed:
@@ -141,7 +164,6 @@ class ReactAgent:
         sources: list[Source] = []
         seen_urls: set[str] = set()
         for msg in messages:
-            # ToolMessage.content 是 search 工具返回的 JSON 字符串
             if not isinstance(msg, ToolMessage):
                 continue
             content = msg.content
@@ -168,21 +190,16 @@ class ReactAgent:
         user_query: str,
         history: Optional[list[dict[str, str]]] = None,
         memory_context: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> GeneratedAnswer:
         """
         执行一轮 ReAct 问答。
-
-        Args:
-            user_query: 用户问题
-            history: 对话历史 [{role, content}, ...]（可选）
-            memory_context: 记忆上下文文本（语义+情景记忆，可选，注入为 system 前缀）
-
-        Returns:
-            GeneratedAnswer
         """
         start = time.perf_counter()
 
-        # 构建输入消息：历史 + 当前用户问题
+        # 注入当前 user_id，供 history_search 等工具通过 ContextVar 获取
+        set_current_user_id(user_id or "")
+
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
 
@@ -194,7 +211,6 @@ class ReactAgent:
             messages: list[BaseMessage] = result.get("messages", [])
             final_text, sources = self._extract_result(messages)
 
-            # 模型未产出有效答案 → 降级回答
             if not final_text:
                 return await self._fallback(user_query, history, start, confidence=0.5)
 
@@ -211,7 +227,6 @@ class ReactAgent:
             )
 
         except Exception as exc:
-            # 图执行异常 → 二次降级（LLM 失败）
             return await self._fallback(
                 user_query, history, start, confidence=0.4, error=str(exc)
             )
@@ -243,11 +258,14 @@ class ReactAgent:
         user_query: str,
         history: Optional[list[dict[str, str]]] = None,
         memory_context: Optional[str] = None,
+        user_id: Optional[str] = None,
     ):
         """
         以 astream_events (v2) 逐事件产出 ReAct 执行过程。
         供 agent/streaming.py 桥接为 SSE 事件。
         """
+        set_current_user_id(user_id or "")
+
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
         async for event in self._graph.astream_events(

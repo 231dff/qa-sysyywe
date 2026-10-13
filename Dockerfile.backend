@@ -6,10 +6,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 系统依赖
+# 系统依赖（新增 tzdata，供 ZoneInfo 使用）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置容器默认时区为东八区
+# 让日志时间、datetime.now() 无参调用都与北京时间对齐
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Python 依赖（国内镜像源加速，避免 PyPI 直连超时）
 COPY requirements.txt .
@@ -17,7 +23,7 @@ RUN pip install --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -r requirements.txt
 
-# 源码
+# 源码（COPY . . 已覆盖所有修改过的文件，包括 agent/、memory/、config.py）
 COPY . .
 
 # 健康检查

@@ -7,6 +7,10 @@ JSON Schema，作为模型「按需加载、自主决策」的边界契约。
 暴露的工具：
 - search: 实时联网搜索（时效性信息）
 - knowledge_search: 本地知识库检索（内部沉淀知识，RAG）
+- graph_search: 知识图谱多跳检索
+- calculator: 安全计算器
+- current_time: 当前 UTC 时间
+- history_search: 检索用户过往会话
 
 查询改写与相关性打分已并入模型推理，降级回答作为内部兜底、不暴露给模型。
 各工具返回值是 JSON 字符串，包含 summary（给 LLM 阅读）+ sources（给前端展示）。
@@ -14,12 +18,28 @@ JSON Schema，作为模型「按需加载、自主决策」的边界契约。
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
 from tools.registry import search_and_filter_pipeline
 from utils.helpers import format_search_context
+
+
+# ============================================================
+# 当前 user_id 上下文（异步安全，避免让 LLM 自己填）
+# ============================================================
+_current_user_id: ContextVar[str] = ContextVar("current_user_id", default="")
+
+
+def set_current_user_id(user_id: str) -> None:
+    """由 ReactAgent 在每轮 run/astream_events 开始时注入当前 user_id。"""
+    _current_user_id.set(user_id or "")
+
+
+def get_current_user_id() -> str:
+    return _current_user_id.get()
 
 
 @tool
@@ -48,7 +68,6 @@ async def search(
     （含 URL 与内容片段）；sources 是结构化的来源列表。
     如果搜索失败或无结果，summary 为「（未搜索到有效结果）」，此时应据实告知用户而非编造。
     """
-    # 复用现有「搜索 → 去重 → 裁剪」流水线（默认用 Tavily 原始分数，省 1 次 LLM 调用）
     _, fragments = await search_and_filter_pipeline(
         query=query,
         use_llm_scoring=False,
@@ -62,7 +81,6 @@ async def search(
             ensure_ascii=False,
         )
 
-    # fragments 形如 [(url, content, score), ...]，仅保留 top max_results 条
     trimmed = fragments[:max_results]
     summary = format_search_context(trimmed)
     sources = [
@@ -225,7 +243,6 @@ def calculator(expression: str) -> str:
     import ast
     import operator
 
-    # 白名单 AST 求值，杜绝任意代码执行
     _ALLOWED_OPS = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
@@ -273,3 +290,51 @@ def current_time() -> str:
     """
     return datetime.now(timezone.utc).isoformat()
 
+
+# ============================================================
+# 历史会话检索工具
+# ============================================================
+@tool
+async def history_search(query: str, top_k: int = 5) -> str:
+    """检索用户过往会话历史。用于回答「我上次问过什么」「之前我们讨论过什么」
+    「我以前提到过……吗」这类需要回忆历史对话的问题。
+
+    【应调用】的场景：
+    - 用户明确提及「上次」「之前」「以前」「历史对话」「我们聊过」等
+    - 用户要求回忆或对比自己过去提过的问题
+    - 需要延续之前未完成的讨论，但当前上下文中没有相关记录
+
+    【不应调用】的场景：
+    - 普通的实时信息查询（改用 search）
+    - 内部文档检索（改用 knowledge_search）
+    - 常识性问题（直接作答）
+
+    参数说明：
+    - query: 用于检索的关键词或自然语言问题
+    - top_k: 返回条数，1-10，默认 5
+
+    返回：JSON 字符串，sessions 字段为匹配的历史消息列表（含 session_id、
+    role、content 截断片段）。若无匹配，sessions 为空数组。
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return json.dumps(
+            {"query": query, "count": 0, "sessions": [], "note": "无法识别用户身份"},
+            ensure_ascii=False,
+        )
+
+    try:
+        from memory.user_store import get_user_store
+    except ImportError:
+        return json.dumps(
+            {"query": query, "count": 0, "sessions": [], "note": "历史存储不可用"},
+            ensure_ascii=False,
+        )
+
+    store = get_user_store()
+    hits = store.search_sessions(user_id=user_id, query=query, top_k=min(max(top_k, 1), 10))
+
+    return json.dumps(
+        {"query": query, "count": len(hits), "sessions": hits},
+        ensure_ascii=False,
+    )
