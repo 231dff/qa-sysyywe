@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os                          # ← 新增
 import sys
 import time
 from pathlib import Path
@@ -45,15 +46,20 @@ app = FastAPI(
 )
 
 # ── CORS ──
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+_cors_env = os.getenv("CORS_ORIGINS", "").strip()
+if _cors_env:
+    _allow_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    _allow_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
-        "http://frontend:3000",
-    ],
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,6 +112,7 @@ async def startup():
 async def shutdown():
     """关闭全局 httpx AsyncClient"""
     reset_shared_client()
+
 
 # ── 全局单例 ──
 _agent: Optional[SearchAgent] = None

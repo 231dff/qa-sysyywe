@@ -121,8 +121,9 @@ class TdaiConfig(BaseSettings):
         description="是否启用 TencentDB-Agent-Memory 分层记忆侧车",
     )
     tdai_gateway_url: str = Field(
-        default="http://127.0.0.1:8420",
-        description="TDAI Gateway 基地址（不含路径）",
+        # ← 改动：默认地址改成 K8s Service DNS 名
+        default="http://tdai-gateway.agent-platform.svc.cluster.local:8420",
+        description="TDAI Gateway 基地址（本地开发时在 .env 覆盖为 http://127.0.0.1:8420）",
     )
     tdai_api_key: str = Field(
         default="",
@@ -144,8 +145,9 @@ class TdaiConfig(BaseSettings):
 # ============================================================
 # Agent 行为配置
 # ============================================================
-class AgentConfig:
-    """Agent 运行时参数"""
+class AgentConfig(BaseSettings):
+    # ← 改动：从普通类改为 BaseSettings，让 K8s ConfigMap / .env 能注入
+    """Agent 运行时参数（支持 .env 环境变量覆盖）"""
 
     # ── 搜索 ──
     max_search_results: int = 10
@@ -177,16 +179,23 @@ class AgentConfig:
     react_recursion_limit: int = 25
     react_temperature: float = 0.3
 
-    # ── 时间感知（新增） ──
+    # ── 时间感知 ──
     timezone: str = "Asia/Shanghai"
     inject_current_time: bool = True
 
-    # ── 历史会话检索（新增） ──
+    # ── 历史会话检索 ──
     history_recall_top_k: int = 5
     history_snippet_max_len: int = 500
 
     # ── 调试 ──
     verbose: bool = False
+
+    model_config = SettingsConfigDict(
+        # ← 改动：新增，环境变量注入入口
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 # ============================================================

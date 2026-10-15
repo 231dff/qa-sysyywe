@@ -236,6 +236,8 @@ async def run_stream_sse(
                 await get_memory_manager().aremember(user_id, session_id, "assistant", answer.answer)
 
     except Exception as exc:
+        import traceback
+        traceback.print_exc()          # ← 新增：把完整堆栈打到容器日志
         yield _sse_event(
             "error",
             {"message": str(exc), "code": type(exc).__name__},

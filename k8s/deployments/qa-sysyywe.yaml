@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-sysyywe
+  namespace: agent-platform
+  labels:
+    app: qa-sysyywe
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: qa-sysyywe
+  template:
+    metadata:
+      labels:
+        app: qa-sysyywe
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/api/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: qa-sysyywe
+          image: qa-sysyywe:local
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: qa-sysyywe-config
+            - secretRef:
+                name: qa-sysyywe-secret
+          env:                                        # ← 新增：修复 UnicodeEncodeError
+            - name: PYTHONIOENCODING
+              value: "utf-8"
+            - name: PYTHONUTF8
+              value: "1"
+            - name: LANG
+              value: "C.UTF-8"
+            - name: LC_ALL
+              value: "C.UTF-8"
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "512Mi"
+            limits:
+              cpu: "1500m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: qa-sysyywe-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qa-sysyywe
+  namespace: agent-platform
+spec:
+  type: ClusterIP
+  selector:
+    app: qa-sysyywe
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

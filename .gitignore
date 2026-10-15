@@ -1,55 +1,13 @@
-# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# 虚拟环境
-venv/
-.venv/
-env/
-
-# 环境变量 (含密钥)
-.env
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# 系统
-.DS_Store
-Thumbs.db
-
-# Pytest
+*.pyc
+*.pyo
 .pytest_cache/
-htmlcov/
-.coverage
-
-# 工作树
-.claude/
-
-# 评测报告（自动生成）
-evals/eval_report.html
-evals/eval_report.json
-evals/report.html
-evals/benchmark.html
-
-# 测试日志
-*.log
-
-# Next.js 前端
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-
-# 根目录 Node
-node_modules/
-.next/
-
-# RAG 知识库持久化数据
+.venv/
+venv/
+.env
 data/
-rag/chroma/
+tests/
+evals/
+.git/
+.gitignore
+*.md

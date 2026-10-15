@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qa-sysyywe-config
+  namespace: agent-platform
+data:
+  LOG_LEVEL: "INFO"
+  RAG_BACKEND: "json"
+  RAG_USE_TRANSFORMERS: "0"
+  CORS_ORIGINS: "http://localhost:3000,http://localhost:3001"
+  TDAI_ENABLED: "false"
+  TDAI_GATEWAY_URL: "http://tdai-gateway.agent-platform.svc.cluster.local:8420"
+  LLM_PROVIDER: "qwen"
