@@ -1,4 +1,14 @@
-# 智能搜索助手
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191110102MACQD9K64018705
+    ProduceID: 7642208309482733858-data_volume/files/所有对话/主对话/qa-sysyywe_README_k8s更新.md
+    ReservedCode1: ""
+    ContentPropagator: 001191110102MACQD9K64028705
+    PropagateID: 467726794233428#1792046240037
+    ReservedCode2: ""
+---
+# 智能搜索助手 (qa-sysyywe)
 
 **自主决策搜索 Agent 系统** —— 基于 LangGraph (ReAct) + Tavily + FastAPI + Next.js 16，面向生产环境的实时联网问答平台。内置知识图谱多跳推理与跨会话记忆，具备完整的可观测性、安全护栏与企业级评测门禁。
 
@@ -16,6 +26,7 @@
   <img src="https://img.shields.io/badge/Coverage-73%25-43A047" alt="Coverage">
   <img src="https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions" alt="CI">
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker" alt="Docker">
+  <img src="https://img.shields.io/badge/Kubernetes-ready-326CE5?logo=kubernetes&logoColor=white" alt="Kubernetes">
   <img src="https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus" alt="Prometheus">
   <img src="https://img.shields.io/badge/Grafana-dashboards-F46800?logo=grafana" alt="Grafana">
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT">
@@ -39,7 +50,7 @@
 | **可观测性** | Prometheus + Grafana | 指标采集、滑动窗口 95% SLA、告警规则 |
 | **评测门禁** | 6 类套件 + 门禁 | 离线回归 / 故障注入 / 安全审计 / 在线监控 / 检索质量 / 记忆 |
 | **容错** | 指数退避 + 优雅降级 | 异常期可用性目标 95%+，绝不崩溃 |
-| **交付** | Docker Compose + CI | 4 服务一键编排、健康检查、两道 CI 门禁 |
+| **交付** | Docker Compose / Kubernetes + CI | 4 服务一键编排或 K8s 清单部署、健康检查、两道 CI 门禁 |
 
 ## 核心特性
 
@@ -89,6 +100,8 @@
 └──────────────────┘                  │ 抓取 + 告警          │
                                       └─────────────────────┘
 ```
+
+调用链自上而下：**Next.js 前端 ──SSE──▶ FastAPI 后端 (8000) ──▶ LangGraph ReAct Agent ──▶ Tavily 搜索 / RAG（JSON 或 Chroma）/ 知识图谱，Memory 与上下文贯穿全程。**
 
 ### 记忆系统（三块地基，user_id 贯穿）
 
@@ -142,7 +155,7 @@
 | 可观测性 | Prometheus · Grafana |
 | 配置 | pydantic-settings · python-dotenv |
 | 测试 / 评测 | pytest · pytest-asyncio · 自研评测框架 `evals` |
-| 交付 | Docker Compose · GitHub Actions |
+| 交付 | Docker Compose · Kubernetes · GitHub Actions |
 
 ## 快速开始
 
@@ -200,6 +213,7 @@ docker exec -it search-backend bash     # 进入容器调试
 |------|---------|------|
 | `Dockerfile.backend` | `python:3.12-slim` | 安装依赖 → 启动 uvicorn |
 | `Dockerfile.frontend` | 多阶段 `node:22-alpine` | `npm build` → 生产 runner 启动 `next start` |
+| `Dockerfile` | `python:3.12-slim` | 后端单镜像，供 Kubernetes / 单容器部署使用 |
 | `docker-compose.yml` | — | 4 服务编排 + bridge 网络 + 健康检查 |
 
 > **Windows 用户**：遇到 Docker Desktop gRPC 问题可直接运行 `.\fix-and-start.ps1`，自动检测状态、清理旧资源并启动。
@@ -231,6 +245,9 @@ TAVILY_API_KEY=tvly-xxx
 LLM_MODEL=                 # 留空则用 provider 默认模型
 LLM_TEMPERATURE=0.3
 TAVILY_API_BASE=https://api.tavily.com
+CORS_ORIGINS=http://localhost:3001,http://localhost:8000   # CORS 白名单，逗号分隔
+RAG_BACKEND=json           # json（默认，本地文件持久化）或 chroma
+# TDAI_ENABLED / TDAI_GATEWAY_URL 见下文「分层长期记忆」章节
 ```
 
 **3. 启动后端**
@@ -238,6 +255,8 @@ TAVILY_API_BASE=https://api.tavily.com
 ```bash
 uvicorn server:app --reload --port 8000   # 或 python server.py
 ```
+
+访问 http://localhost:8000/docs 查看 API。
 
 **4. 启动前端（二选一）**
 
@@ -254,6 +273,84 @@ streamlit run app.py                          # → http://localhost:8501
 ```bash
 pytest tests/ -v       # 全部 220 条
 ```
+
+### 方式三：Kubernetes 部署
+
+**前置条件**
+
+- K8s 集群（本地可用 Docker Desktop Kubernetes 或 minikube）
+- `kubectl` 已配置到目标集群
+- 镜像可被集群访问（本地开发清单使用 `imagePullPolicy: Never`）
+
+**1. 构建后端镜像**
+
+```bash
+docker build -t qa-sysyywe:local .
+docker run --rm -p 8000:8000 \
+  -e LLM_PROVIDER=qwen \
+  -e LLM_API_KEY=sk-xxx \
+  -e TAVILY_API_KEY=tvly-xxx \
+  qa-sysyywe:local
+```
+
+**2. 创建 namespace**
+
+```powershell
+kubectl create namespace agent-platform
+```
+
+**3. 创建 Secret（不要提交到 Git）**
+
+```powershell
+kubectl create secret generic qa-sysyywe-secret `
+  -n agent-platform `
+  --from-literal=LLM_API_KEY="sk-你的key" `
+  --from-literal=TAVILY_API_KEY="tvly-你的key"
+```
+
+bash / macOS 等价命令：
+
+```bash
+kubectl create secret generic qa-sysyywe-secret \
+  -n agent-platform \
+  --from-literal=LLM_API_KEY="sk-你的key" \
+  --from-literal=TAVILY_API_KEY="tvly-你的key"
+```
+
+**4. 部署**
+
+一键脚本（Windows）：
+
+```powershell
+.\deploy.ps1
+```
+
+或手动 apply：
+
+```powershell
+kubectl apply -f k8s/configmaps/qa-sysyywe-config.yaml
+kubectl apply -f k8s/quotas/qa-sysyywe-pvc.yaml
+kubectl apply -f k8s/deployments/qa-sysyywe.yaml
+kubectl rollout status deployment/qa-sysyywe -n agent-platform
+```
+
+**5. 本地访问**
+
+```powershell
+kubectl port-forward -n agent-platform svc/qa-sysyywe 8000:8000
+```
+
+**关键配置说明**
+
+| 项 | 值 | 原因 |
+|----|----|------|
+| `replicas` | 1 | `SessionStore` 是进程内内存 dict，多副本会丢会话 |
+| `strategy` | `Recreate` | PVC 是 RWO，不能被两个 Pod 同时挂载 |
+| `livenessProbe` | `/api/health` | 项目内置健康检查端点 |
+| `readinessProbe` | `/api/health` | 同上 |
+| `prometheus.io/path` | `/api/metrics` | 项目内置 Prometheus 指标端点 |
+| `PYTHONIOENCODING` | `utf-8` | 容器默认 locale 是 ASCII，中文输出会崩 |
+| `imagePullPolicy` | `Never` | 本地镜像，不从远端拉 |
 
 ## API 端点
 
@@ -426,7 +523,7 @@ pytest tests/test_tdai_adapter.py -v    # TDAI 侧车适配层
 ## 项目结构
 
 ```
-qa/
+qa-sysyywe/
 ├── agent/              # Agent 核心：ReAct 决策、工具集、SSE 流式桥接
 ├── tools/              # 工具注册中心（tavily_search / rewrite_query / score_relevance / fallback_answer）
 ├── rag/                # RAG 知识库 + 结构化索引（extractor / graph / structured）
@@ -434,16 +531,33 @@ qa/
 ├── utils/              # 工具函数（护栏 / 指标 / 压缩 / HTTP 连接池）
 ├── monitoring/         # Prometheus + Grafana 配置与仪表盘
 ├── evals/              # 企业级评测框架（6 类套件 + 门禁）
+├── k8s/                # Kubernetes 部署文件
+│   ├── configmaps/     #   qa-sysyywe-config.yaml
+│   ├── quotas/        #   qa-sysyywe-pvc.yaml（RWO 持久卷）
+│   └── deployments/   #   qa-sysyywe.yaml（Deployment + Service + 探针）
 ├── tests/              # 测试（220 条）
 ├── frontend/           # Next.js 16 前端
 ├── .github/workflows/  # CI 门禁
 ├── server.py           # FastAPI 后端入口
 ├── app.py              # Streamlit 开发调试面板
 ├── config.py           # 全局配置（多平台 provider）
-├── Dockerfile.*        # 前后端 Docker 镜像
-└── docker-compose.yml  # 一键部署编排
+├── deploy.ps1          # Kubernetes 一键部署脚本（Windows）
+├── Dockerfile          # 后端单镜像（K8s / 单容器部署）
+├── Dockerfile.*        # 前后端 Docker 镜像（Compose 全栈）
+└── docker-compose.yml  # 一键部署编排（4 服务）
 ```
+
+## 已知限制
+
+- **会话不跨副本**：`SessionStore` 是进程内内存 dict，Pod 重启会话会丢失，多副本也无法共享（计划迁移到 Redis）；因此 K8s 清单固定 `replicas=1` + `strategy: Recreate`。
+- **RAG 持久化依赖卷**：默认 `RAG_BACKEND=json` 写本地文件，K8s 下依赖 RWO PVC 持久化；多副本共享需切换 `chroma` 或外部向量库。
+- **暂无自动扩缩容**：单副本部署，未配置 HPA。
+- **TDAI 单租户**：L3 人设层全局召回、不按 `user_id` 隔离，多租户场景保持 `TDAI_ENABLED=false`。
 
 ## License
 
 MIT
+
+---
+
+
