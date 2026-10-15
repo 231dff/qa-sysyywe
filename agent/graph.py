@@ -16,6 +16,7 @@ from typing import Optional
 from agent.models import GeneratedAnswer
 from agent.react import ReactAgent
 from config import get_agent_config
+from memory.session_store import get_session_store      # ← 新增
 from memory.user_store import get_user_store
 from memory.memory_manager import get_memory_manager
 from utils.guardrails import check_input_guardrails
@@ -39,7 +40,7 @@ class SearchAgent:
         self.deduplicator = URLDeduplicator(
             window_size=get_agent_config().dedup_window
         )
-        self._sessions: dict[str, list[dict[str, str]]] = {}
+        self._sessions = get_session_store()            # ← 改这里
         self._user_store = get_user_store()
         self._memory = get_memory_manager()
         self._react = ReactAgent(verbose=verbose)

@@ -5,7 +5,7 @@ AIGC:
     ProduceID: 7642208309482733858-data_volume/files/所有对话/主对话/qa-sysyywe_README_k8s更新.md
     ReservedCode1: ""
     ContentPropagator: 001191110102MACQD9K64028705
-    PropagateID: 467726794233428#1792046240037
+    PropagateID: 467726794233428#1792053335586
     ReservedCode2: ""
 ---
 # 智能搜索助手 (qa-sysyywe)
@@ -274,83 +274,74 @@ streamlit run app.py                          # → http://localhost:8501
 pytest tests/ -v       # 全部 220 条
 ```
 
-### 方式三：Kubernetes 部署
+## Kubernetes 生产级部署
 
-**前置条件**
+面向多副本、可水平扩展的生产部署：会话状态外置 Redis，Agent 无状态化后由 HPA 自动扩缩，Ingress 统一入口并为 SSE 关闭代理缓冲。
 
-- K8s 集群（本地可用 Docker Desktop Kubernetes 或 minikube）
-- `kubectl` 已配置到目标集群
-- 镜像可被集群访问（本地开发清单使用 `imagePullPolicy: Never`）
+### 架构
 
-**1. 构建后端镜像**
-
-```bash
-docker build -t qa-sysyywe:local .
-docker run --rm -p 8000:8000 \
-  -e LLM_PROVIDER=qwen \
-  -e LLM_API_KEY=sk-xxx \
-  -e TAVILY_API_KEY=tvly-xxx \
-  qa-sysyywe:local
+```text
+用户 → qa.local (Ingress)
+        ↓
+  ┌─────┴─────┬─────────┐
+  ↓           ↓         ↓
+[Pod1]      [Pod2]    [Pod3]   ← HPA 自动扩缩（min 2 / max 10）
+  └─────┬─────┴─────────┘
+        ↓
+     [Redis]              ← 跨 Pod 会话共享
+        ↓
+      [LLM]               ← OpenAI 兼容接口
 ```
 
-**2. 创建 namespace**
+### 组件清单
 
-```powershell
-kubectl create namespace agent-platform
-```
+| 组件 | 部署文件 | 说明 |
+|---|---|---|
+| Agent 服务 | `k8s/deployments/qa-sysyywe.yaml` | 3 副本 + RollingUpdate |
+| HPA | `k8s/hpa/qa-sysyywe-hpa.yaml` | CPU 70% / 内存 80% 触发扩缩 |
+| Redis | `k8s/redis/redis.yaml` | 会话共享存储 |
+| Ingress | `k8s/ingress/qa-sysyywe-ingress.yaml` | SSE 已关缓冲 |
+| ConfigMap | `k8s/configmaps/qa-sysyywe-config.yaml` | 非敏感配置 |
+| Secret | `kubectl create secret ...` | API Key |
 
-**3. 创建 Secret（不要提交到 Git）**
-
-```powershell
-kubectl create secret generic qa-sysyywe-secret `
-  -n agent-platform `
-  --from-literal=LLM_API_KEY="sk-你的key" `
-  --from-literal=TAVILY_API_KEY="tvly-你的key"
-```
-
-bash / macOS 等价命令：
-
-```bash
-kubectl create secret generic qa-sysyywe-secret \
-  -n agent-platform \
-  --from-literal=LLM_API_KEY="sk-你的key" \
-  --from-literal=TAVILY_API_KEY="tvly-你的key"
-```
-
-**4. 部署**
-
-一键脚本（Windows）：
+### 一键部署
 
 ```powershell
 .\deploy.ps1
 ```
 
-或手动 apply：
+### 关键设计决策
 
-```powershell
-kubectl apply -f k8s/configmaps/qa-sysyywe-config.yaml
-kubectl apply -f k8s/quotas/qa-sysyywe-pvc.yaml
-kubectl apply -f k8s/deployments/qa-sysyywe.yaml
-kubectl rollout status deployment/qa-sysyywe -n agent-platform
+| 决策 | 原因 |
+|---|---|
+| Session 存 Redis | 进程内 dict 多副本会丢会话，迁 Redis 后支持水平扩展 |
+| SessionStore 实现 dict 兼容接口 | 业务代码 `agent._sessions[...]` 零改动切后端 |
+| RollingUpdate + `maxUnavailable: 0` | 更新时零中断 |
+| HPA `minReplicas: 2` | 保证单 Pod 故障时服务不中断 |
+| Ingress `proxy-buffering: off` | SSE 流式输出不被 Nginx 缓冲 |
+| `PYTHONIOENCODING=utf-8` | 容器 locale 缺失导致中文输出崩溃 |
+
+### 前端部署
+
+前端是 Next.js 16（App Router），使用 standalone 输出模式。
+
+```text
+用户浏览器 → qa.local
+├── /api/* → qa-sysyywe (后端)
+└── /* → qa-frontend (前端)
 ```
 
-**5. 本地访问**
+**关键设计**：
+- 前端通过 Ingress 同域访问后端，无跨域问题
+- `NEXT_PUBLIC_BACKEND_URL=""`（空字符串）让浏览器用相对路径
+- `BACKEND_URL` 用于 SSR 服务端调用（集群内地址）
 
-```powershell
-kubectl port-forward -n agent-platform svc/qa-sysyywe 8000:8000
-```
+### 环境要求
 
-**关键配置说明**
-
-| 项 | 值 | 原因 |
-|----|----|------|
-| `replicas` | 1 | `SessionStore` 是进程内内存 dict，多副本会丢会话 |
-| `strategy` | `Recreate` | PVC 是 RWO，不能被两个 Pod 同时挂载 |
-| `livenessProbe` | `/api/health` | 项目内置健康检查端点 |
-| `readinessProbe` | `/api/health` | 同上 |
-| `prometheus.io/path` | `/api/metrics` | 项目内置 Prometheus 指标端点 |
-| `PYTHONIOENCODING` | `utf-8` | 容器默认 locale 是 ASCII，中文输出会崩 |
-| `imagePullPolicy` | `Never` | 本地镜像，不从远端拉 |
+- K8s 1.28+
+- metrics-server（HPA 依赖）
+- nginx-ingress-controller
+- 支持 ReadWriteOnce 的 StorageClass（Redis 用）
 
 ## API 端点
 
@@ -531,10 +522,12 @@ qa-sysyywe/
 ├── utils/              # 工具函数（护栏 / 指标 / 压缩 / HTTP 连接池）
 ├── monitoring/         # Prometheus + Grafana 配置与仪表盘
 ├── evals/              # 企业级评测框架（6 类套件 + 门禁）
-├── k8s/                # Kubernetes 部署文件
-│   ├── configmaps/     #   qa-sysyywe-config.yaml
-│   ├── quotas/        #   qa-sysyywe-pvc.yaml（RWO 持久卷）
-│   └── deployments/   #   qa-sysyywe.yaml（Deployment + Service + 探针）
+├── k8s/                # Kubernetes 生产级部署清单
+│   ├── configmaps/     #   qa-sysyywe-config.yaml（非敏感配置）
+│   ├── deployments/    #   qa-sysyywe.yaml（3 副本 Deployment + Service + 探针）
+│   ├── hpa/            #   qa-sysyywe-hpa.yaml（CPU 70% / 内存 80% 扩缩）
+│   ├── redis/          #   redis.yaml（跨 Pod 会话共享，RWO PVC）
+│   └── ingress/        #   qa-sysyywe-ingress.yaml（qa.local，SSE 关缓冲）
 ├── tests/              # 测试（220 条）
 ├── frontend/           # Next.js 16 前端
 ├── .github/workflows/  # CI 门禁
@@ -549,9 +542,8 @@ qa-sysyywe/
 
 ## 已知限制
 
-- **会话不跨副本**：`SessionStore` 是进程内内存 dict，Pod 重启会话会丢失，多副本也无法共享（计划迁移到 Redis）；因此 K8s 清单固定 `replicas=1` + `strategy: Recreate`。
-- **RAG 持久化依赖卷**：默认 `RAG_BACKEND=json` 写本地文件，K8s 下依赖 RWO PVC 持久化；多副本共享需切换 `chroma` 或外部向量库。
-- **暂无自动扩缩容**：单副本部署，未配置 HPA。
+- **RAG 本地后端不支持多副本共享**：默认 `RAG_BACKEND=json` 写本地文件，多副本下各 Pod 的 JSON 存储互不同步；生产多副本需切换 `chroma` 或外部向量库。
+- **Redis 为单实例**：`k8s/redis/redis.yaml` 提供的是带 RWO PVC 的单实例 Redis，未做哨兵/集群高可用，属于可用性单点。
 - **TDAI 单租户**：L3 人设层全局召回、不按 `user_id` 隔离，多租户场景保持 `TDAI_ENABLED=false`。
 
 ## License

@@ -7,16 +7,26 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
 spec:
   ingressClassName: nginx
   rules:
     - host: qa.local
       http:
         paths:
-          - path: /
+          # API 请求 → 后端（优先匹配）
+          - path: /api/
             pathType: Prefix
             backend:
               service:
                 name: qa-sysyywe
                 port:
                   number: 8000
+          # 其他所有请求 → 前端
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qa-frontend
+                port:
+                  number: 3000

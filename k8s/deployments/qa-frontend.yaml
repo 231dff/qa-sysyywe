@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-frontend
+  namespace: agent-platform
+  labels:
+    app: qa-frontend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: qa-frontend
+  template:
+    metadata:
+      labels:
+        app: qa-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: qa-frontend:local
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # SSR / rewrites 用（集群内部地址）
+            - name: BACKEND_URL
+              value: "http://qa-sysyywe.agent-platform.svc.cluster.local:8000"
+            # 浏览器用（空 = 相对路径，走 Ingress 分流）
+            - name: NEXT_PUBLIC_BACKEND_URL
+              value: ""
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qa-frontend
+  namespace: agent-platform
+spec:
+  type: ClusterIP
+  selector:
+    app: qa-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000

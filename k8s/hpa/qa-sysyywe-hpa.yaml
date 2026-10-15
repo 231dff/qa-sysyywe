@@ -1,0 +1,42 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: qa-sysyywe-hpa
+  namespace: agent-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: qa-sysyywe
+  minReplicas: 2                       # 最小 2 副本，保证可用性
+  maxReplicas: 10                      # 最大 10 副本，防止成本失控
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70       # CPU 超过 70% 就扩
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80       # 内存超过 80% 就扩
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30   # 30s 内持续高负载才扩
+      policies:
+        - type: Percent
+          value: 100                   # 一次最多翻倍
+          periodSeconds: 30
+        - type: Pods
+          value: 4                     # 或一次最多加 4 个
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5 分钟持续低负载才缩
+      policies:
+        - type: Percent
+          value: 25                    # 一次最多缩 25%
+          periodSeconds: 60

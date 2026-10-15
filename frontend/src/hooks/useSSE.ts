@@ -18,7 +18,8 @@ import type {
  *  - Docker/生产: Next.js API Route 代理 (同域，无跨域)
  *  Docker 时前端不存在跨域问题 (rewrites)，所以走相对路径即可
  */
-const SSE_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+// 空字符串 = 用相对路径，由 Ingress 分流到后端
+const SSE_BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "";
 
 interface UseSSEState {
   status: "idle" | "connecting" | "streaming" | "done" | "error";

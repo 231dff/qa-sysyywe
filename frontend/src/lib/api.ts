@@ -60,7 +60,12 @@ export function getOrCreateUserId(): string {
   try {
     let id = window.localStorage.getItem(USER_ID_KEY);
     if (!id) {
-      id = `u_${crypto.randomUUID()}`;
+      // 兼容非 HTTPS 环境（crypto.randomUUID 在 http://qa.local 可能不可用）
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        id = `u_${crypto.randomUUID()}`;
+      } else {
+        id = `u_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      }
       window.localStorage.setItem(USER_ID_KEY, id);
     }
     return id;

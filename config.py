@@ -121,13 +121,12 @@ class TdaiConfig(BaseSettings):
         description="是否启用 TencentDB-Agent-Memory 分层记忆侧车",
     )
     tdai_gateway_url: str = Field(
-        # ← 改动：默认地址改成 K8s Service DNS 名
         default="http://tdai-gateway.agent-platform.svc.cluster.local:8420",
         description="TDAI Gateway 基地址（本地开发时在 .env 覆盖为 http://127.0.0.1:8420）",
     )
     tdai_api_key: str = Field(
         default="",
-        description="TDAI Gateway 鉴权 Bearer Key（与 TDAI_GATEWAY_API_KEY 对齐，空=无鉴权）",
+        description="TDAI Gateway 鉴权 Bearer Key（空=无鉴权）",
     )
     tdai_timeout: float = Field(
         default=30.0,
@@ -146,7 +145,6 @@ class TdaiConfig(BaseSettings):
 # Agent 行为配置
 # ============================================================
 class AgentConfig(BaseSettings):
-    # ← 改动：从普通类改为 BaseSettings，让 K8s ConfigMap / .env 能注入
     """Agent 运行时参数（支持 .env 环境变量覆盖）"""
 
     # ── 搜索 ──
@@ -190,8 +188,18 @@ class AgentConfig(BaseSettings):
     # ── 调试 ──
     verbose: bool = False
 
+    # ── 会话存储（新增） ──
+    session_backend: str = Field(
+        default="memory",
+        description="会话后端: memory（单副本）| redis（多副本共享）",
+    )
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: str = ""
+    redis_key_prefix: str = "session:"
+
     model_config = SettingsConfigDict(
-        # ← 改动：新增，环境变量注入入口
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",

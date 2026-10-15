@@ -6,9 +6,12 @@ metadata:
   labels:
     app: qa-sysyywe
 spec:
-  replicas: 1
+  replicas: 3                          # ← 改：单副本 → 3 副本
   strategy:
-    type: Recreate
+    type: RollingUpdate                # ← 改：Recreate → RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                      # 更新时最多多起 1 个 Pod
+      maxUnavailable: 0                # 更新时保证 0 个 Pod 不可用
   selector:
     matchLabels:
       app: qa-sysyywe
@@ -37,7 +40,7 @@ spec:
                 name: qa-sysyywe-config
             - secretRef:
                 name: qa-sysyywe-secret
-          env:                                        # ← 新增：修复 UnicodeEncodeError
+          env:
             - name: PYTHONIOENCODING
               value: "utf-8"
             - name: PYTHONUTF8
@@ -46,6 +49,12 @@ spec:
               value: "C.UTF-8"
             - name: LC_ALL
               value: "C.UTF-8"
+            - name: SESSION_BACKEND
+              value: "redis"
+            - name: REDIS_HOST
+              value: "redis.agent-platform.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
           resources:
             requests:
               cpu: "300m"
@@ -76,8 +85,7 @@ spec:
               mountPath: /tmp
       volumes:
         - name: data
-          persistentVolumeClaim:
-            claimName: qa-sysyywe-data
+          emptyDir: {}                 # ← 改：PVC → emptyDir（多副本兼容）
         - name: tmp
           emptyDir: {}
 ---
