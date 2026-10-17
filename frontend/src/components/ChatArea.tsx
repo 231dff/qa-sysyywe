@@ -15,8 +15,14 @@ export default function ChatArea() {
 
   // 自动滚动到底部
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sse.tokens]);
+    // 使用 setTimeout 延迟滚动，等待 Markdown 渲染及 DOM 高度计算完成
+    const timer = setTimeout(() => {
+      bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+    }, 100);
+
+    return () => clearTimeout(timer);
+    // 监听消息列表、流式 token 以及状态变化（done/error 时兜底滚动）
+  }, [messages, sse.tokens, sse.status]);
 
   // 构建流式中的临时消息 — 只在流式进行中（connecting/streaming）显示，done 后的消息由 ChatProvider 加入 messages
   const streamingMsg: ChatMessage | null =

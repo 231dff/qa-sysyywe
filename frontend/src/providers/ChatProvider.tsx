@@ -1,10 +1,28 @@
 "use client";
 
-// 智能搜索助手 — 聊天状态管理 Provider
+// 智能搜索助手 — 聊天状态管理 Provider (前端自管历史会话版)
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
 import type { ChatMessage, UserSettings, SessionSummary } from "../lib/types";
 import { useSSE } from "../hooks/useSSE";
-import { generateSessionId, getOrCreateUserId, getSessions, getSession, deleteSession as apiDeleteSession } from "../lib/api";
+import { generateSessionId, getOrCreateUserId, getSession, deleteSession as apiDeleteSession } from "../lib/api";
+
+const LOCAL_SESSIONS_KEY = "qa_local_sessions_v1";
+
+// ── 本地存储辅助函数 ──
+const getLocalSessions = (): SessionSummary[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(LOCAL_SESSIONS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveLocalSessions = (data: SessionSummary[]) => {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(LOCAL_SESSIONS_KEY, JSON.stringify(data));
+};
 
 interface ChatContextType {
   messages: ChatMessage[];
@@ -12,17 +30,13 @@ interface ChatContextType {
   userId: string;
   settings: UserSettings;
   stats: { totalQueries: number; totalTokens: number };
-  // 会话列表
   sessions: SessionSummary[];
   sessionsLoading: boolean;
-  // SSE 状态
   sse: ReturnType<typeof useSSE>;
-  // 操作
   sendMessage: (content: string) => Promise<void>;
   clearHistory: () => void;
   newSession: () => void;
   updateSettings: (s: Partial<UserSettings>) => void;
-  // 会话管理
   refreshSessions: () => Promise<void>;
   switchSession: (sid: string) => Promise<void>;
   removeSession: (sid: string) => Promise<void>;
@@ -48,39 +62,32 @@ export default function ChatProvider({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const [stats, setStats] = useState({ totalQueries: 0, totalTokens: 0 });
+  
+  // 会话列表现在完全由前端维护
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  
   const sse = useSSE();
   const msgCounter = useRef(0);
 
-  // 首次挂载时初始化 userId
+  // 初始化 userId 和 本地列表
   useEffect(() => {
     setUserId(getOrCreateUserId());
+    setSessions(getLocalSessions());
   }, []);
 
-  // ── 加载会话列表 ──
+  // 刷新本地列表
   const refreshSessions = useCallback(async () => {
-    if (!userId) return;
-    setSessionsLoading(true);
-    try {
-      const data = await getSessions(userId);
-      setSessions(data.sessions || []);
-    } catch (e) {
-      console.error("加载会话列表失败", e);
-    } finally {
-      setSessionsLoading(false);
-    }
-  }, [userId]);
-
-  useEffect(() => {
-    if (userId) refreshSessions();
-  }, [userId, refreshSessions]);
+    setSessions(getLocalSessions());
+  }, []);
 
   // ── 切换会话 ──
   const switchSession = useCallback(
     async (sid: string) => {
       if (!userId) return;
+      setSessionsLoading(true);
       try {
+        // 依然从后端(Redis)拉取该会话的历史记录
         const info = await getSession(sid, userId);
         const history: ChatMessage[] = (info.history || []).map(
           (m, i) => ({
@@ -94,6 +101,8 @@ export default function ChatProvider({
         sse.reset();
       } catch (e) {
         console.error("切换会话失败", e);
+      } finally {
+        setSessionsLoading(false);
       }
     },
     [userId, sse]
@@ -104,17 +113,23 @@ export default function ChatProvider({
     async (sid: string) => {
       if (!userId) return;
       try {
+        // 通知后端删除
         await apiDeleteSession(sid, userId);
+        
+        // 从前端本地列表中移除
+        const current = getLocalSessions().filter((s) => s.session_id !== sid);
+        saveLocalSessions(current);
+        setSessions(current);
+
         if (sid === sessionId) {
           setMessages([]);
           setSessionId(generateSessionId());
         }
-        await refreshSessions();
       } catch (e) {
         console.error("删除会话失败", e);
       }
     },
-    [userId, sessionId, refreshSessions]
+    [userId, sessionId]
   );
 
   const clearHistory = useCallback(() => {
@@ -132,10 +147,35 @@ export default function ChatProvider({
     setSettings((prev) => ({ ...prev, ...s }));
   }, []);
 
+  // ── 发送消息 ──
   const sendMessage = useCallback(
     async (content: string) => {
       if (!content.trim() || !userId) return;
 
+      // 1. 更新前端会话列表
+      let currentSessions = getLocalSessions();
+      const exists = currentSessions.find((s) => s.session_id === sessionId);
+
+      if (!exists) {
+        // 新会话，加入列表
+        const newSession: SessionSummary = {
+          session_id: sessionId,
+          title: content.slice(0, 20) || "新对话", // 截取前20字当标题
+          preview: content.slice(0, 50),
+          message_count: 1,
+        };
+        currentSessions = [newSession, ...currentSessions];
+      } else {
+        // 已有会话，更新预览并移到最前
+        currentSessions = currentSessions.filter((s) => s.session_id !== sessionId);
+        exists.preview = content.slice(0, 50);
+        exists.message_count = (exists.message_count || 0) + 1;
+        currentSessions = [exists, ...currentSessions];
+      }
+      saveLocalSessions(currentSessions);
+      setSessions(currentSessions);
+
+      // 2. 发送 SSE 请求
       const userMsg: ChatMessage = {
         id: `u_${msgCounter.current++}`,
         role: "user",
@@ -172,8 +212,6 @@ export default function ChatProvider({
         totalQueries: prev.totalQueries + 1,
         totalTokens: prev.totalTokens + (sse.meta?.tokens_used ?? 0),
       }));
-      // 消息完成后刷新侧边栏
-      refreshSessions();
     } else if (sse.status === "error" && sse.error) {
       const errorMsg: ChatMessage = {
         id: `e_${msgCounter.current++}`,
