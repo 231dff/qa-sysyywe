@@ -55,6 +55,19 @@ spec:
               value: "redis.agent-platform.svc.cluster.local"
             - name: REDIS_PORT
               value: "6379"
+              # ── Langfuse 链路追踪 ──
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qa-sysyywe-secret
+                  key: LANGFUSE_PUBLIC_KEY
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qa-sysyywe-secret
+                  key: LANGFUSE_SECRET_KEY
+            - name: LANGFUSE_HOST
+              value: "https://cloud.langfuse.com"
           resources:
             requests:
               cpu: "300m"

@@ -2,17 +2,55 @@
 智能搜索助手 — FastAPI 后端
 提供 SSE 流式聊天端点 + 会话管理 REST API
 支持 Prometheus 指标收集与 95% SLA 可用性统计
+集成 OpenTelemetry + Langfuse 全链路 Trace
 """
 from __future__ import annotations
 
 import asyncio
-import os                          # ← 新增
+import os
 import sys
 import time
+import base64
 from pathlib import Path
 
 # ensure project root on path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# ============================================================
+# OpenTelemetry 初始化 (必须在其他 import 之前)
+# ============================================================
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "")
+
+if LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY and LANGFUSE_HOST:
+    # 构建 Langfuse 的 Basic Auth
+    auth_token = base64.b64encode(f"{LANGFUSE_PUBLIC_KEY}:{LANGFUSE_SECRET_KEY}".encode()).decode()
+    
+    # 配置 OTLP Exporter
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"{LANGFUSE_HOST}/api/public/otel"
+    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"Authorization=Basic {auth_token}"
+    
+    resource = Resource.create({SERVICE_NAME: "qa-sysyywe-backend"})
+    provider = TracerProvider(resource=resource)
+    processor = BatchSpanProcessor(OTLPSpanExporter())
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
+    print(f"[OTel] Tracing enabled, exporting to {LANGFUSE_HOST}")
+else:
+    print("[OTel] Tracing disabled (missing LANGFUSE env vars)")
+
+# 引入自动埋点 instrumentation
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from openinference.instrumentation.langchain import LangChainInstrumentor
+# ============================================================
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +62,7 @@ from agent.graph import SearchAgent
 from agent.streaming import run_stream_sse
 from config import get_api_config, get_agent_config, get_tdai_config
 from memory.session_store import get_session_store
-from memory.user_store import get_user_store          # 新增
+from memory.user_store import get_user_store
 from memory.memory_manager import get_memory_manager
 from memory.tdai_adapter import get_tdai_adapter
 from utils.helpers import generate_session_id
@@ -44,6 +82,11 @@ app = FastAPI(
     description="实时联网搜索 Agent 的 FastAPI 后端服务",
     version="1.0.0",
 )
+
+# 开启自动化埋点
+FastAPIInstrumentor.instrument_app(app)
+HTTPXClientInstrumentor().instrument()
+LangChainInstrumentor().instrument()
 
 # ── CORS ──
 _cors_env = os.getenv("CORS_ORIGINS", "").strip()
@@ -96,7 +139,6 @@ async def metrics_middleware(request: Request, call_next):
 @app.on_event("startup")
 async def startup():
     """创建全局 httpx AsyncClient，复用 TCP 连接池"""
-    import httpx
     client = httpx.AsyncClient(
         timeout=60.0,
         limits=httpx.Limits(
@@ -112,7 +154,6 @@ async def startup():
 async def shutdown():
     """关闭全局 httpx AsyncClient"""
     reset_shared_client()
-
 
 # ── 全局单例 ──
 _agent: Optional[SearchAgent] = None
@@ -161,6 +202,15 @@ class HealthResponse(BaseModel):
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """SSE 流式聊天 — 逐 token 推送答案生成进度"""
+    # 获取当前的 Span，并注入 Langfuse 专用属性
+    span = trace.get_current_span()
+    if span.is_recording():
+        if req.user_id:
+            span.set_attribute("langfuse.user.id", req.user_id)
+        sid_for_trace = req.session_id or "auto-generated"
+        span.set_attribute("langfuse.session.id", sid_for_trace)
+        span.set_attribute("langfuse.tags", ["qa-sysyywe", "chat-stream"])
+
     agent = get_agent()
     sid = req.session_id or generate_session_id()
 
@@ -204,7 +254,6 @@ async def chat_stream(req: ChatRequest, request: Request):
 # 会话管理端点
 # ============================================================
 
-# 新增：会话列表（供前端侧边栏使用）
 @app.get("/api/sessions")
 async def list_sessions(user_id: str = ""):
     """返回该用户的所有会话，按消息数量降序排列"""
@@ -220,14 +269,12 @@ async def list_sessions(user_id: str = ""):
         if not history:
             continue
 
-        # 取第一条 user 消息作为标题
         title = "新对话"
         for msg in history:
             if msg.get("role") == "user":
                 title = msg["content"][:30]
                 break
 
-        # 取最后一条消息作为预览
         last_msg = history[-1] if history else {}
 
         result.append({
@@ -241,24 +288,20 @@ async def list_sessions(user_id: str = ""):
     return {"user_id": user_id, "sessions": result}
 
 
-# 修改：支持 user_id 查询（优先从 UserStore 读）
 @app.get("/api/session/{session_id}")
 async def get_session(session_id: str, user_id: Optional[str] = None):
-    # 优先从 UserStore（持久化，按 user_id 隔离）
     if user_id:
         store = get_user_store()
         history = store.get_history(user_id, session_id)
         if history:
             return SessionInfo(session_id=session_id, history=history, active=False)
 
-    # 回退到内存中的 SearchAgent
     agent = get_agent()
     history = agent.get_history(session_id)
     active = session_id in agent._sessions
     return SessionInfo(session_id=session_id, history=history, active=active)
 
 
-# 修改：删除时同时清 UserStore
 @app.delete("/api/session/{session_id}")
 async def delete_session(session_id: str, user_id: Optional[str] = None):
     if user_id:
