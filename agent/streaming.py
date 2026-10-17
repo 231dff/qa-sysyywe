@@ -1,20 +1,10 @@
 """
 智能搜索助手 — SSE 流式传输编排器
-
-基于 ReactAgent.astream_events (LangGraph v2) 将 ReAct 执行过程桥接为
-前端可消费的 SSE 事件流。事件契约对前端完全向后兼容：
-
-    progress → {node, message}     node ∈ rewrite|search|generate|fallback|score
-    token    → {text}
-    sources  → {sources:[{url,title,snippet}]}
-    done     → {confidence, latency_ms, tokens_used, is_fallback}
-    error    → {message, code}
 """
 from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
 from langchain_core.messages import ToolMessage
@@ -28,7 +18,7 @@ from utils.helpers import count_tokens, generate_session_id
 
 
 # ============================================================
-# SSE 事件格式工具
+# SSE 事件格式化工具
 # ============================================================
 def _sse_event(event: str, data: dict) -> str:
     """将 Python dict 格式化为 SSE 兼容的字节流。"""
@@ -83,10 +73,6 @@ async def run_stream_sse(
 ) -> AsyncGenerator[str, None]:
     """
     执行 ReAct Agent 并实时推送 SSE 事件。
-
-    agent 为 SearchAgent（内部持有 ReactAgent）。本函数直接消费
-    agent._react.astream_events(...) 的事件流，逐 token 推送答案，
-    并在结束时维护会话历史。
     """
     agent_cfg = get_agent_config()
     api_cfg = get_api_config()
@@ -127,8 +113,9 @@ async def run_stream_sse(
         answer_text = ""
         sources: list[Source] = []
         used_search = False
+        revised_text = None  # ★ 记录 Reviewer 修复后的文本
 
-        # ★ 传入 user_id，供 history_search 工具识别用户
+        # ★ 传入 user_id，供 history_search 工具识别用户，同时触发 astream_events
         async for event in agent._react.astream_events(
             user_query,
             history,
@@ -151,7 +138,7 @@ async def run_stream_sse(
                 name = event.get("name", "")
                 if "search" in name:
                     used_search = True
-                    answer_text = ""
+                    answer_text = ""  # 如果中途调用了搜索，清空之前的自言自语
                     tool_input = data.get("input", {}) or {}
                     q = tool_input.get("query", "") or ""
                     yield _sse_event(
@@ -167,8 +154,21 @@ async def run_stream_sse(
                         existing.add(s.url)
                         sources.append(s)
 
+            # ★ 新增：处理自定义的 progress 事件（如：触发 Reviewer 审核）
+            elif kind == "progress":
+                yield _sse_event("progress", data)
+
+            # ★ 新增：处理自定义的 revise 事件（Reviewer 发现幻觉并重写了答案）
+            elif kind == "revise":
+                revised_text = data.get("text", "")
+                yield _sse_event("revise", data)
+
         # ── 结果构造 ──
         elapsed_ms = (time.perf_counter() - start) * 1000
+
+        # 如果 Reviewer 修改了答案，用修复后的版本替换原文本
+        if revised_text:
+            answer_text = revised_text
 
         if not answer_text:
             fallback_text = await agent._react._fallback(
@@ -237,7 +237,7 @@ async def run_stream_sse(
 
     except Exception as exc:
         import traceback
-        traceback.print_exc()          # ← 新增：把完整堆栈打到容器日志
+        traceback.print_exc()          # 把完整堆栈打到容器日志
         yield _sse_event(
             "error",
             {"message": str(exc), "code": type(exc).__name__},

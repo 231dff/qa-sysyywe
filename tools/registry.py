@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
+import os
 import re
+import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -66,7 +68,6 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         description="LLM 降级回答：当搜索不可用时，基于 LLM 参数化知识生成答案",
     ),
 }
-
 
 # ============================================================
 # Tool 1: Tavily 搜索
@@ -156,7 +157,6 @@ async def tavily_search(
             error=f"搜索失败: {str(exc)}",
         )
 
-
 # ============================================================
 # Tool 2: LLM 查询改写
 # ============================================================
@@ -177,7 +177,6 @@ REWRITE_SYSTEM_PROMPT = """你是一个搜索查询优化专家。你的任务�
   "sub_queries": ["子查询1", "子查询2"]
 }"""
 
-
 async def rewrite_query(
     user_query: str,
     conversation_history: Optional[list[dict[str, str]]] = None,
@@ -189,10 +188,9 @@ async def rewrite_query(
     api_cfg = get_api_config()
     agent_cfg = get_agent_config()
 
-    # 构建历史上下文
     history_text = ""
     if conversation_history:
-        recent = conversation_history[-6:]  # 最近 3 轮
+        recent = conversation_history[-6:]
         turns = []
         for msg in recent:
             role = "用户" if msg["role"] == "user" else "助手"
@@ -209,7 +207,6 @@ async def rewrite_query(
 
     start = time.perf_counter()
     try:
-        # DeepSeek 等 provider 不支持 response_format，需按平台能力降级
         request_body = {
             "model": api_cfg.llm_model,
             "temperature": 0.1,
@@ -237,7 +234,6 @@ async def rewrite_query(
 
         elapsed = time.perf_counter() - start
         record_llm_call("rewrite", elapsed)
-        # 估算 token 用量
         usage = data.get("usage", {})
         record_tokens(
             usage.get("prompt_tokens", 0),
@@ -262,7 +258,6 @@ async def rewrite_query(
             original=user_query,
             rewritten=user_query,
         )
-
 
 # ============================================================
 # Tool 3: LLM 相关性打分
@@ -292,28 +287,24 @@ RELEVANCE_SYSTEM_PROMPT = """你是一个搜索结果质量评估专家。对每
   ]
 }"""
 
-
 async def score_relevance(
     user_query: str,
     search_results: list[SearchResult],
 ) -> RelevanceScores:
-    """
-    使用 LLM 对搜索结果逐一打分，过滤低质量结果
-    """
+    """使用 LLM 对搜索结果逐一打分，过滤低质量结果"""
     if not search_results:
         return RelevanceScores(results=[])
 
     api_cfg = get_api_config()
     agent_cfg = get_agent_config()
 
-    # 构建候选列表
     candidates = []
     for i, r in enumerate(search_results):
         candidates.append({
             "index": i,
             "url": r.url,
             "title": r.title,
-            "content": r.content[:500],  # 截断以减少 token
+            "content": r.content[:500],
         })
 
     user_message = f"""## 用户问题
@@ -364,7 +355,6 @@ async def score_relevance(
     except Exception as exc:
         if agent_cfg.verbose:
             print(f"[相关性打分失败] {exc}, 回退到原始分数")
-        # 回退：使用搜索 API 自带的分数
         fallback = []
         for r in search_results:
             fallback.append(RelevanceScore(
@@ -374,7 +364,6 @@ async def score_relevance(
                 reason="原始搜索分数",
             ))
         return RelevanceScores(results=fallback)
-
 
 # ============================================================
 # Tool 4: LLM 降级回答
@@ -394,14 +383,11 @@ FALLBACK_SYSTEM_PROMPT = """你是一个智能问答助手。由于实时搜索�
 - **禁止**: 不要用大段文字、不要多级标题
 - **格式**: 使用 Markdown，保持简洁——多用列表，少用段落"""
 
-
 async def generate_fallback_answer(
     user_query: str,
     conversation_history: Optional[list[dict[str, str]]] = None,
 ) -> str:
-    """
-    当搜索 API 不可用时，降级为纯 LLM 知识回答
-    """
+    """当搜索 API 不可用时，降级为纯 LLM 知识回答"""
     api_cfg = get_api_config()
 
     messages = [{"role": "system", "content": FALLBACK_SYSTEM_PROMPT}]
@@ -445,9 +431,8 @@ async def generate_fallback_answer(
         record_error("llm_error")
         return f"抱歉，当前无法生成回答。请稍后重试。（错误: {str(exc)}）"
 
-
 # ============================================================
-# 组合工具: 搜索 + 去重 + 打分 + 裁剪 (完整流水线)
+# 组合工具: 搜索 + 去重 + 打分 + 裁剪 + 落盘
 # ============================================================
 async def search_and_filter_pipeline(
     query: str,
@@ -462,7 +447,7 @@ async def search_and_filter_pipeline(
     2. URL 去重
     3. (可选) LLM 相关性打分 — 默认关闭，用 Tavily 原始分数省 1 次 LLM 调用
     4. Top-K + Token 裁剪
-    Returns: (原始结果, 裁剪后的 fragments)
+    5. (新增) 长内容落盘保存机制
     """
     agent_cfg = get_agent_config()
 
@@ -503,7 +488,7 @@ async def search_and_filter_pipeline(
         for s in scores.results:
             score_map[s.url] = s.relevance
     else:
-        # 直接使用 Tavily 自带的分数，省 1 次 LLM 往返 (~1-3s)
+        # 直接使用 Tavily 自带的分数
         for r in deduped:
             score_map[r.url] = r.score if r.score else 0.5
 
@@ -524,5 +509,32 @@ async def search_and_filter_pipeline(
         after_tokens = sum(len(f[1]) // 2 for f in trimmed)
         reduction = (1 - after_tokens / max(before_tokens, 1)) * 100
         print(f"[裁剪] {len(fragments)}条({before_tokens}tok) → {len(trimmed)}条({after_tokens}tok), 减少 {reduction:.0f}% token")
+
+    # ---- Step 5: 新增：长输出持久化落盘机制 ----
+    total_chars = sum(len(r.content) for r in deduped)
+    file_path_str = ""
+    
+    if total_chars > 3000:
+        TOOL_OUTPUT_DIR = "/tmp/tool_outputs"
+        os.makedirs(TOOL_OUTPUT_DIR, exist_ok=True)
+        
+        filename = f"search_{uuid.uuid4().hex[:8]}.json"
+        filepath = os.path.join(TOOL_OUTPUT_DIR, filename)
+        
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                # 将原始搜索结果序列化保存
+                json.dump([r.model_dump() for r in deduped], f, ensure_ascii=False, indent=2)
+            file_path_str = filepath
+            if agent_cfg.verbose:
+                print(f"[落盘] 搜索结果较长({total_chars}字符)，已保存至 {file_path_str}")
+        except Exception as e:
+            if agent_cfg.verbose:
+                print(f"[落盘失败] {e}")
+
+    # 如果有落盘，追加一个特殊提示
+    if file_path_str:
+        tip = f"[系统提示: 原始搜索结果较长({total_chars}字符)已被截断。完整内容保存在 {file_path_str}。如果当前摘要信息不足以回答问题，请调用 read_tool_output 工具读取该路径。]"
+        trimmed.append(("system_tip", tip, 1.0))
 
     return deduped, trimmed

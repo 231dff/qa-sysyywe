@@ -13,6 +13,7 @@ import type {
   SourcesEvent,
   ErrorEvent,
 } from "../lib/types";
+
 /** SSE 流式端点 — 直连后端。
  *  - 本地开发: http://localhost:8000
  *  - Docker/生产: Next.js API Route 代理 (同域，无跨域)
@@ -183,6 +184,15 @@ function handleEvent(
         ...prev,
         status: "error",
         error: d.message,
+      }));
+      break;
+    }
+    // ★ 新增：处理 Reviewer 触发重写的事件
+    case "revise": {
+      const d = data as { text: string };
+      setState((prev) => ({
+        ...prev,
+        tokens: d.text, // 直接用修正后的文本覆盖当前打字内容
       }));
       break;
     }
