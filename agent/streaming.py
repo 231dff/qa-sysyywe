@@ -10,7 +10,7 @@ from typing import AsyncGenerator, Optional
 from langchain_core.messages import ToolMessage
 
 from agent.models import GeneratedAnswer, Source
-from config import get_agent_config, get_api_config, get_tdai_config
+from config import get_agent_config, get_tdai_config
 from memory.user_store import get_user_store
 from memory.memory_manager import get_memory_manager
 from memory.tdai_adapter import get_tdai_adapter
@@ -68,6 +68,9 @@ async def run_stream_sse(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
     model_override: Optional[str] = None,
+    llm_provider: Optional[str] = None,  # ★ 新增
+    api_base: Optional[str] = None,      # ★ 新增
+    api_key: Optional[str] = None,       # ★ 新增
     search_depth_override: Optional[str] = None,
     top_k_override: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
@@ -75,13 +78,9 @@ async def run_stream_sse(
     执行 ReAct Agent 并实时推送 SSE 事件。
     """
     agent_cfg = get_agent_config()
-    api_cfg = get_api_config()
     tdai_cfg = get_tdai_config()
 
-    # ── 运行时配置覆盖（与旧实现语义一致） ──
-    orig_model = api_cfg.llm_model
-    if model_override:
-        api_cfg.llm_model = model_override
+    # ★ 移除了全局 api_cfg.llm_model 的覆写，改为安全透传
 
     # ── 会话初始化 ──
     if session_id is None:
@@ -112,15 +111,18 @@ async def run_stream_sse(
 
         answer_text = ""
         sources: list[Source] = []
-        used_search = False
-        revised_text = None  # ★ 记录 Reviewer 修复后的文本
+        revised_text = None
 
-        # ★ 传入 user_id，供 history_search 工具识别用户，同时触发 astream_events
+        # ★ 核心透传：将模型配置和搜索参数全部传给 ReactAgent
         async for event in agent._react.astream_events(
             user_query,
             history,
             memory_context=memory_context,
             user_id=user_id,
+            model_override=model_override,  # ★
+            llm_provider=llm_provider,      # ★
+            api_base=api_base,              # ★
+            api_key=api_key,                # ★
         ):
             kind = event.get("event", "")
             data = event.get("data", {})
@@ -137,7 +139,6 @@ async def run_stream_sse(
             elif kind == "on_tool_start":
                 name = event.get("name", "")
                 if "search" in name:
-                    used_search = True
                     answer_text = ""  # 如果中途调用了搜索，清空之前的自言自语
                     tool_input = data.get("input", {}) or {}
                     q = tool_input.get("query", "") or ""
@@ -154,11 +155,11 @@ async def run_stream_sse(
                         existing.add(s.url)
                         sources.append(s)
 
-            # ★ 新增：处理自定义的 progress 事件（如：触发 Reviewer 审核）
+            # 处理自定义的 progress 事件（如：触发 Reviewer 审核）
             elif kind == "progress":
                 yield _sse_event("progress", data)
 
-            # ★ 新增：处理自定义的 revise 事件（Reviewer 发现幻觉并重写了答案）
+            # 处理自定义的 revise 事件（Reviewer 发现幻觉并重写了答案）
             elif kind == "revise":
                 revised_text = data.get("text", "")
                 yield _sse_event("revise", data)
@@ -237,11 +238,8 @@ async def run_stream_sse(
 
     except Exception as exc:
         import traceback
-        traceback.print_exc()          # 把完整堆栈打到容器日志
+        traceback.print_exc()
         yield _sse_event(
             "error",
             {"message": str(exc), "code": type(exc).__name__},
         )
-
-    finally:
-        api_cfg.llm_model = orig_model

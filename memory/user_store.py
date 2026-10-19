@@ -2,29 +2,24 @@
 智能搜索助手 — 用户存储（持久化）
 
 解决「金鱼记忆」的第一块地基：把会话从进程内 dict 迁移到按 user_id 隔离的
-JSON 持久化，使会话在进程/容器重启后仍可恢复，且归属到具体用户。
+持久化存储，使会话在进程/容器重启后仍可恢复，且归属到具体用户。
 
-数据布局：
-    data/sessions/<safe_user_id>.json
-        {
-          "user_id": "u_xxx",
-          "created_at": 1234567.8,
-          "sessions": { "<session_id>": [ {role,content}, ... ], ... }
-        }
-
-安全：user_id 作为文件名前先做规范化，杜绝路径穿越。
+支持两种后端：
+- file: 本地 JSON 文件持久化
+- redis: 云原生 Redis 持久化（支持多副本 Pod 共享）
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from config import PROJECT_ROOT
+from config import PROJECT_ROOT, get_agent_config
 
 
 # ============================================================
@@ -47,21 +42,16 @@ def _safe_user_id(user_id: str) -> str:
     return safe[:64] or "anon"
 
 
-class UserStore:
-    """
-    按 user_id 隔离的会话持久化存储（线程安全）。
-
-    - 每个用户一个 JSON 文件，加载时全量读入内存，写入时落盘
-    - 会话历史沿用 {role, content} 结构，与 SearchAgent._sessions 完全兼容
-    """
-
+# ============================================================
+# 文件后端
+# ============================================================
+class FileUserStore:
     def __init__(self, persist_dir: Optional[Path] = None):
         self.persist_dir = str(persist_dir or PROJECT_ROOT / "data" / "sessions")
         self._users: dict[str, dict] = {}
         self._lock = threading.RLock()
         self._load_all()
 
-    # ── 持久化 ──
     def _path(self, user_id: str) -> Path:
         return Path(self.persist_dir) / f"{_safe_user_id(user_id)}.json"
 
@@ -93,7 +83,6 @@ class UserStore:
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
         )
 
-    # ── 用户 ──
     def get_or_create(self, user_id: str) -> dict:
         with self._lock:
             if user_id not in self._users:
@@ -101,11 +90,6 @@ class UserStore:
                 self._save(user_id)
             return self._users[user_id]
 
-    def exists(self, user_id: str) -> bool:
-        with self._lock:
-            return user_id in self._users
-
-    # ── 会话 ──
     def get_history(self, user_id: str, session_id: str) -> list[dict[str, str]]:
         with self._lock:
             user = self._users.get(user_id)
@@ -133,36 +117,23 @@ class UserStore:
             return list(user.get("sessions", {}).keys())
 
     def clear_user(self, user_id: str) -> None:
-        """删除该用户所有会话（不删用户记录本身）。"""
         with self._lock:
             user = self._users.get(user_id)
             if user:
                 user["sessions"] = {}
                 self._save(user_id)
 
-    # ── 历史检索（新增） ──
-    def search_sessions(
-        self,
-        user_id: str,
-        query: str,
-        top_k: int = 5,
-        snippet_max_len: int = 500,
-    ) -> list[dict]:
-        """
-        按关键词检索用户历史会话，返回按相关性排序的 Top-K 消息片段。
-
-        策略：关键词重叠打分（零依赖、离线确定）。
-        中文按标点切分，英文按空格切分；重叠越多排名越高。
-        """
+    def search_sessions(self, user_id: str, query: str, top_k: int = 5, snippet_max_len: int = 500) -> list[dict]:
         with self._lock:
             user = self._users.get(user_id)
             if user is None:
                 return []
             sessions: dict[str, list[dict]] = dict(user.get("sessions", {}))
+        return self._do_search(sessions, query, top_k, snippet_max_len)
 
+    def _do_search(self, sessions, query, top_k, snippet_max_len):
         if not sessions:
             return []
-
         query_tokens = _tokenize(query)
         if not query_tokens:
             return []
@@ -180,7 +151,6 @@ class UserStore:
                 hits.append((overlap, sid, msg))
 
         hits.sort(key=lambda x: x[0], reverse=True)
-
         return [
             {
                 "session_id": sid,
@@ -191,12 +161,96 @@ class UserStore:
         ]
 
 
-# 全局单例
-_user_store: Optional[UserStore] = None
+# ============================================================
+# Redis 后端
+# ============================================================
+class RedisUserStore:
+    def __init__(self):
+        import redis
+        cfg = get_agent_config()
+        self._client = redis.Redis(
+            host=cfg.redis_host,
+            port=cfg.redis_port,
+            db=cfg.redis_db,
+            password=cfg.redis_password or None,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+        # 测试连接
+        self._client.ping()
+        self._prefix = "user_sessions:"
+
+    def _key(self, user_id: str) -> str:
+        return f"{self._prefix}{_safe_user_id(user_id)}"
+
+    def get_or_create(self, user_id: str) -> dict:
+        # Redis Hash 不需要显式创建
+        return {}
+
+    def get_history(self, user_id: str, session_id: str) -> list[dict[str, str]]:
+        raw = self._client.hget(self._key(user_id), session_id)
+        if not raw:
+            return []
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+    def set_history(self, user_id: str, session_id: str, history: list[dict[str, str]]) -> None:
+        self._client.hset(
+            self._key(user_id),
+            session_id,
+            json.dumps(list(history), ensure_ascii=False)
+        )
+
+    def delete_session(self, user_id: str, session_id: str) -> None:
+        self._client.hdel(self._key(user_id), session_id)
+
+    def list_sessions(self, user_id: str) -> list[str]:
+        return self._client.hkeys(self._key(user_id))
+
+    def clear_user(self, user_id: str) -> None:
+        self._client.delete(self._key(user_id))
+
+    def search_sessions(self, user_id: str, query: str, top_k: int = 5, snippet_max_len: int = 500) -> list[dict]:
+        # 从 Redis 中拉取该用户的所有会话
+        raw_map = self._client.hgetall(self._key(user_id))
+        if not raw_map:
+            return []
+
+        sessions = {}
+        for sid, raw_json in raw_map.items():
+            try:
+                sessions[sid] = json.loads(raw_json)
+            except json.JSONDecodeError:
+                continue
+
+        # 复用文件版的搜索逻辑
+        store = FileUserStore(in_memory=True) if hasattr(FileUserStore, "in_memory") else FileUserStore.__new__(FileUserStore)
+        return store._do_search(sessions, query, top_k, snippet_max_len)
 
 
-def get_user_store() -> UserStore:
+# ============================================================
+# 工厂 + 单例
+# ============================================================
+_user_store: Optional[object] = None
+
+
+def get_user_store():
+    """根据环境变量选择后端"""
     global _user_store
-    if _user_store is None:
-        _user_store = UserStore()
+    if _user_store is not None:
+        return _user_store
+
+    cfg = get_agent_config()
+    backend = (cfg.session_backend or "file").lower()
+
+    if backend == "redis":
+        _user_store = RedisUserStore()
+    else:
+        _user_store = FileUserStore()
+        
     return _user_store
+
+UserStore = FileUserStore

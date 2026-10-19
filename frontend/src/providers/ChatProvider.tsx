@@ -63,31 +63,26 @@ export default function ChatProvider({
   const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const [stats, setStats] = useState({ totalQueries: 0, totalTokens: 0 });
   
-  // 会话列表现在完全由前端维护
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   
   const sse = useSSE();
   const msgCounter = useRef(0);
 
-  // 初始化 userId 和 本地列表
   useEffect(() => {
     setUserId(getOrCreateUserId());
     setSessions(getLocalSessions());
   }, []);
 
-  // 刷新本地列表
   const refreshSessions = useCallback(async () => {
     setSessions(getLocalSessions());
   }, []);
 
-  // ── 切换会话 ──
   const switchSession = useCallback(
     async (sid: string) => {
       if (!userId) return;
       setSessionsLoading(true);
       try {
-        // 依然从后端(Redis)拉取该会话的历史记录
         const info = await getSession(sid, userId);
         const history: ChatMessage[] = (info.history || []).map(
           (m, i) => ({
@@ -108,15 +103,11 @@ export default function ChatProvider({
     [userId, sse]
   );
 
-  // ── 删除会话 ──
   const removeSession = useCallback(
     async (sid: string) => {
       if (!userId) return;
       try {
-        // 通知后端删除
         await apiDeleteSession(sid, userId);
-        
-        // 从前端本地列表中移除
         const current = getLocalSessions().filter((s) => s.session_id !== sid);
         saveLocalSessions(current);
         setSessions(current);
@@ -157,16 +148,14 @@ export default function ChatProvider({
       const exists = currentSessions.find((s) => s.session_id === sessionId);
 
       if (!exists) {
-        // 新会话，加入列表
         const newSession: SessionSummary = {
           session_id: sessionId,
-          title: content.slice(0, 20) || "新对话", // 截取前20字当标题
+          title: content.slice(0, 20) || "新对话",
           preview: content.slice(0, 50),
           message_count: 1,
         };
         currentSessions = [newSession, ...currentSessions];
       } else {
-        // 已有会话，更新预览并移到最前
         currentSessions = currentSessions.filter((s) => s.session_id !== sessionId);
         exists.preview = content.slice(0, 50);
         exists.message_count = (exists.message_count || 0) + 1;
@@ -183,11 +172,25 @@ export default function ChatProvider({
       };
       setMessages((prev) => [...prev, userMsg]);
 
+      // ★ 新增：从 localStorage 读取自定义模型配置
+      let customConfig: any = {};
+      try {
+        const saved = localStorage.getItem("custom_llm_config");
+        if (saved) customConfig = JSON.parse(saved);
+      } catch (e) {
+        console.error("解析本地模型配置失败", e);
+      }
+
       await sse.startStream({
         query: content,
         session_id: sessionId,
         user_id: userId,
-        model: settings.model,
+        // ★ 如果用户填了自定义配置，就用自定义的；否则用默认配置
+        model: customConfig.model || settings.model,
+        llm_provider: customConfig.provider || undefined,
+        api_base: customConfig.apiBase || undefined,
+        api_key: customConfig.apiKey || undefined,
+        
         search_depth: settings.searchDepth,
         top_k: settings.topK,
       });

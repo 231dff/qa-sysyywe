@@ -1,6 +1,5 @@
 "use client";
 
-// 智能搜索助手 — 聊天输入框
 import { useState, useRef } from "react";
 
 interface ChatInputProps {
@@ -17,7 +16,6 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
     if (!text || disabled) return;
     onSubmit(text);
     setValue("");
-    // 重置高度
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -30,7 +28,6 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
     }
   };
 
-  // 自动调整高度
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
     const el = e.target;
@@ -39,26 +36,27 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
   };
 
   return (
-    <div className="border-t border-gray-200 bg-white p-4">
-      <div className="flex gap-2 items-end max-w-3xl mx-auto">
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          placeholder="输入你的问题，例如：今天有什么重大新闻？"
-          disabled={disabled}
-          rows={1}
-          className="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-gray-400 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
-        />
-        <button
-          onClick={handleSubmit}
-          disabled={disabled || !value.trim()}
-          className="px-5 py-2.5 bg-gray-900 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-        >
-          {disabled ? "..." : "发送"}
-        </button>
-      </div>
+    <div className="relative flex items-end w-full bg-white border border-gray-300 rounded-[24px] shadow-sm px-3 py-2 focus-within:border-gray-400 focus-within:ring-1 focus-within:ring-gray-400 transition-all">
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={handleInput}
+        onKeyDown={handleKeyDown}
+        placeholder="给智能搜索助手发送消息..."
+        disabled={disabled}
+        rows={1}
+        className="w-full bg-transparent px-2 py-2 text-[15px] text-gray-800 resize-none focus:outline-none max-h-[200px] min-h-[44px]"
+      />
+      <button
+        onClick={handleSubmit}
+        disabled={disabled || !value.trim()}
+        className="mb-1 mr-1 flex items-center justify-center w-8 h-8 rounded-full bg-black hover:bg-gray-800 text-white transition disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
     </div>
   );
 }

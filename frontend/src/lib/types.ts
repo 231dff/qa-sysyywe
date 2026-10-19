@@ -8,11 +8,16 @@ export interface ChatRequest {
   model?: string | null;
   search_depth?: string | null;
   top_k?: number | null;
+  
+  // ★ 新增：支持自定义大模型配置
+  llm_provider?: string | null;
+  api_base?: string | null;
+  api_key?: string | null;
 }
 
 /** SSE 进度事件 */
 export interface ProgressEvent {
-  node: "rewrite" | "search" | "generate" | "fallback" | "score";
+  node: "rewrite" | "search" | "generate" | "fallback" | "score" | "reviewer";
   message: string;
 }
 
@@ -53,7 +58,8 @@ export type SSEEvent =
   | { type: "token"; data: TokenEvent }
   | { type: "sources"; data: SourcesEvent }
   | { type: "done"; data: DoneEvent }
-  | { type: "error"; data: ErrorEvent };
+  | { type: "error"; data: ErrorEvent }
+  | { type: "revise"; data: { text: string } }; // ★ 新增 Reviewer 纠正事件
 
 /** 聊天消息 */
 export interface ChatMessage {
@@ -90,6 +96,7 @@ export interface UserSettings {
   searchDepth: string;
   topK: number;
 }
+
 /** 会话摘要（侧边栏列表用） */
 export interface SessionSummary {
   session_id: string;

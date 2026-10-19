@@ -1,9 +1,6 @@
 """
 智能搜索助手 — 全局配置管理
 基于 pydantic-settings，支持 .env 环境变量注入
-
-多平台适配：通过 LLM_PROVIDER 环境变量选择预设（openai / qwen / deepseek），
-或直接设置 LLM_API_BASE + LLM_MODEL 覆盖。
 """
 from __future__ import annotations
 
@@ -44,7 +41,6 @@ PROVIDER_PRESETS: dict[str, dict] = {
 
 
 def get_provider_preset(provider: str) -> dict:
-    """获取 provider 预设，未知 provider 回退到 openai 结构但不覆盖用户显式配置"""
     return PROVIDER_PRESETS.get(provider.lower(), {})
 
 
@@ -52,8 +48,6 @@ def get_provider_preset(provider: str) -> dict:
 # 外部 API 配置
 # ============================================================
 class APIConfig(BaseSettings):
-    """第三方 API 密钥与端点"""
-
     llm_provider: str = Field(
         default="",
         description="LLM 提供商预设: openai | qwen | deepseek（空则用 llm_api_base 直连）",
@@ -114,25 +108,10 @@ class APIConfig(BaseSettings):
 # TencentDB-Agent-Memory（TDAI）可选外部记忆侧车
 # ============================================================
 class TdaiConfig(BaseSettings):
-    """TencentDB-Agent-Memory 独立 Gateway 连接配置（可选增强记忆）。"""
-
-    tdai_enabled: bool = Field(
-        default=False,
-        description="是否启用 TencentDB-Agent-Memory 分层记忆侧车",
-    )
-    tdai_gateway_url: str = Field(
-        default="http://tdai-gateway.agent-platform.svc.cluster.local:8420",
-        description="TDAI Gateway 基地址（本地开发时在 .env 覆盖为 http://127.0.0.1:8420）",
-    )
-    tdai_api_key: str = Field(
-        default="",
-        description="TDAI Gateway 鉴权 Bearer Key（空=无鉴权）",
-    )
-    tdai_timeout: float = Field(
-        default=30.0,
-        gt=0.0,
-        description="TDAI Gateway 单次请求超时（秒）",
-    )
+    tdai_enabled: bool = Field(default=False)
+    tdai_gateway_url: str = Field(default="http://tdai-gateway.agent-platform.svc.cluster.local:8420")
+    tdai_api_key: str = Field(default="")
+    tdai_timeout: float = Field(default=30.0, gt=0.0)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -145,8 +124,6 @@ class TdaiConfig(BaseSettings):
 # Agent 行为配置
 # ============================================================
 class AgentConfig(BaseSettings):
-    """Agent 运行时参数（支持 .env 环境变量覆盖）"""
-
     # ── 搜索 ──
     max_search_results: int = 10
     search_depth: str = "advanced"
@@ -161,7 +138,8 @@ class AgentConfig(BaseSettings):
 
     # ── 会话 ──
     max_history_turns: int = 10
-    session_ttl_seconds: int = 3600
+    # ★ 修改：将默认 1 小时改为 7 天 (86400 * 7)
+    session_ttl_seconds: int = 604800
 
     # ── 重试 ──
     max_retries: int = 3
@@ -174,7 +152,7 @@ class AgentConfig(BaseSettings):
 
     # ── ReAct Agent ──
     max_react_iterations: int = 6
-    react_recursion_limit: int = 25
+    react_recursion_limit: int = 40 # 之前优化时已经改成了40
     react_temperature: float = 0.3
 
     # ── 时间感知 ──
@@ -188,11 +166,8 @@ class AgentConfig(BaseSettings):
     # ── 调试 ──
     verbose: bool = False
 
-    # ── 会话存储（新增） ──
-    session_backend: str = Field(
-        default="memory",
-        description="会话后端: memory（单副本）| redis（多副本共享）",
-    )
+    # ── 会话存储 ──
+    session_backend: str = Field(default="memory", description="memory | redis")
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
@@ -215,7 +190,6 @@ _tdai_config: Optional[TdaiConfig] = None
 
 
 def get_api_config() -> APIConfig:
-    """获取 API 配置单例"""
     global _api_config
     if _api_config is None:
         _api_config = APIConfig()
@@ -223,7 +197,6 @@ def get_api_config() -> APIConfig:
 
 
 def get_agent_config() -> AgentConfig:
-    """获取 Agent 配置单例"""
     global _agent_config
     if _agent_config is None:
         _agent_config = AgentConfig()
@@ -231,7 +204,6 @@ def get_agent_config() -> AgentConfig:
 
 
 def get_tdai_config() -> TdaiConfig:
-    """获取 TencentDB-Agent-Memory 配置单例"""
     global _tdai_config
     if _tdai_config is None:
         _tdai_config = TdaiConfig()
@@ -239,11 +211,6 @@ def get_tdai_config() -> TdaiConfig:
 
 
 def resolve_llm_connection() -> dict:
-    """
-    解析实际生效的 LLM 连接参数。
-
-    优先级：LLM_PROVIDER 预设 → 显式 LLM_API_BASE/LLM_MODEL。
-    """
     cfg = get_api_config()
     provider = cfg.resolved_provider
     preset = get_provider_preset(provider)
