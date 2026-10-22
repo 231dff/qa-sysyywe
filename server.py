@@ -4,6 +4,7 @@
 支持 Prometheus 指标收集与 95% SLA 可用性统计
 集成 OpenTelemetry + Langfuse 全链路 Trace
 支持语义缓存（Semantic Cache）极速响应
+支持动态 MCP 工具加载
 """
 from __future__ import annotations
 
@@ -58,6 +59,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 
+# ★ MCP 客户端引入
+from langchain_mcp_adapters.client import MultiServerMCPClient
+import agent.react as react_module
+
 from agent.graph import SearchAgent
 from agent.streaming import run_stream_sse
 from config import get_api_config, get_agent_config, get_tdai_config, resolve_llm_connection
@@ -74,7 +79,7 @@ from utils.metrics import (
     get_metrics_text,
     get_all_stats,
 )
-from utils.semantic_cache import get_semantic_cache  # ★ 引入语义缓存
+from utils.semantic_cache import get_semantic_cache
 
 import httpx
 
@@ -148,6 +153,22 @@ async def startup():
     )
     set_shared_client(client)
 
+    # ★ MCP 默认内置工具加载
+    try:
+        print("[MCP] 正在连接本地默认 MCP Server...")
+        mcp_client = MultiServerMCPClient({
+            "weather_server": {
+                "command": sys.executable,
+                "args": ["/app/mcp_server.py"],
+                "transport": "stdio",
+            }
+        })
+        tools = await mcp_client.get_tools()
+        react_module._GLOBAL_MCP_TOOLS = tools
+        print(f"[MCP] 成功加载 {len(tools)} 个默认工具: {[t.name for t in tools]}")
+    except Exception as e:
+        print(f"[MCP] 加载失败: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -172,11 +193,12 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话 ID (不传则自动生成)")
     user_id: Optional[str] = Field(None, description="用户 ID (用于跨会话记忆归属)")
     
-    # 支持前端动态下发大模型配置
+    # 支持前端动态下发大模型配置与 MCP 配置
     model: Optional[str] = Field(None, description="LLM 模型覆盖")
     llm_provider: Optional[str] = Field(None, description="提供商标识 (如 openai/qwen)")
     api_base: Optional[str] = Field(None, description="LLM API Base URL")
     api_key: Optional[str] = Field(None, description="LLM API Key")
+    mcp_config: Optional[dict] = Field(None, description="自定义 MCP 配置") # ★ 新增
 
     search_depth: Optional[str] = Field(None, description="搜索深度 (basic | advanced)")
     top_k: Optional[int] = Field(None, ge=2, le=10, description="保留 Top-K 片段")
@@ -229,10 +251,10 @@ async def chat_stream(req: ChatRequest, request: Request):
         has_error = False
         full_answer = ""
         
-        # ★ 1. 判断是否是新会话（没有历史上下文）
+        # 1. 判断是否是新会话（没有历史上下文）
         is_new_turn = len(agent.get_history(sid)) == 0
         
-        # ★ 2. 尝试从语义缓存获取（仅在新会话时生效，防止上下文污染）
+        # 2. 尝试从语义缓存获取（仅在新会话时生效，防止上下文污染）
         if is_new_turn:
             cache = get_semantic_cache()
             cached_answer = cache.get(req.query)
@@ -261,6 +283,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             llm_provider=req.llm_provider,
             api_base=req.api_base,
             api_key=req.api_key,
+            mcp_config=req.mcp_config, # ★ 透传
             search_depth_override=req.search_depth,
             top_k_override=req.top_k,
         ):
@@ -303,7 +326,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             if len(updated_tags) > len(base_tags):
                 span.set_attribute("langfuse.tags", updated_tags)
 
-        # ★ 5. 生成成功，写入语义缓存
+        # 5. 生成成功，写入语义缓存
         if is_new_turn and full_answer and not has_error and not has_fallback:
             cache = get_semantic_cache()
             cache.set(req.query, full_answer)
@@ -319,7 +342,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     )
 
 # ============================================================
-# 辅助 SSE 格式化 (如果没有引入的话，直接在这个文件里定义)
+# 辅助 SSE 格式化
 # ============================================================
 def _sse_event(event: str, data: dict) -> str:
     payload = json.dumps(data, ensure_ascii=False)

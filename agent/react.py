@@ -1,22 +1,19 @@
 """
 智能搜索助手 — ReAct Agent
-包含：动态模型配置、长文截断读取、状态栏、防死循环、禁止独白、条件化审核、并行工具调用引导
+包含：动态模型配置、MCP动态工具透传、子Agent上下文隔离、长文截断、状态栏、条件化审核、Artifact图表生成
 """
 from __future__ import annotations
 
 import json
 import re
 import time
+import hashlib
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
+    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
 )
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphRecursionError
@@ -24,15 +21,9 @@ from langgraph.prebuilt import create_react_agent
 
 from agent.models import GeneratedAnswer, Source
 from agent.tools import (
-    calculator,
-    current_time,
-    graph_search,
-    history_search,
-    knowledge_search,
-    read_tool_output,
-    reset_tool_counts,
-    search,
-    set_current_user_id,
+    calculator, current_time, graph_search, history_search,
+    knowledge_search, read_tool_output, reset_tool_counts, search,
+    set_current_user_id, spawn_search_worker, set_llm_context,
 )
 from config import get_agent_config, get_api_config, resolve_llm_connection, PROVIDER_PRESETS
 from tools.registry import generate_fallback_answer
@@ -40,32 +31,36 @@ from utils.context import compress_history
 from utils.helpers import count_tokens
 
 # ============================================================
+# ★ MCP 全局缓存（支持前端动态下发）
+# ============================================================
+_GLOBAL_MCP_TOOLS = []
+_MCP_TOOLS_CACHE = {}  # 缓存格式: {config_hash: [tools]}
+
+# ============================================================
 # 主 Agent (Proposer) 系统提示
 # ============================================================
 REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答用户的问题。
 
 ## 可用工具与边界
-- `search`: 实时联网搜索，用于最新新闻/股价/天气等**时效性互联网信息**
-- `read_tool_output`: 读取因为过长被截断的完整搜索结果。当 `search` 的结果末尾提示了 `[系统提示: ...请调用 read_tool_output 工具读取...]`，且当前摘要信息不足以回答问题时，调用此工具读取。
-- `knowledge_search`: 本地知识库检索，用于**内部文档/制度/历史决策**等沉淀知识
-- `graph_search`: 知识图谱检索，用于需要**多跳推理/精确消歧**的垂直场景
-- `history_search`: 检索用户**过往会话**，用于「我上次问过什么」等回忆类问题
-- `calculator`: 精确数值计算
-- `current_time`: 获取当前时间
+- `spawn_search_worker`: **（最高优先级）** 委派子 Agent 去独立检索并提炼信息。适用于复杂对比、多实体查询、或者需要阅读大量长文的场景。
+- `search`: 实时联网搜索，用于简单的、单条时效性信息的查询。
+- `read_tool_output`: 读取被截断的完整搜索结果。当 `search` 的结果末尾提示了 `[系统提示: ...请调用 read_tool_output...]`，且当前摘要信息不足以回答问题时，调用此工具读取。
+- `knowledge_search`: 本地知识库检索，用于内部沉淀知识。
+- `graph_search`: 知识图谱检索，用于多跳推理/精确消歧。
+- `history_search`: 检索用户过往会话。
+- `calculator`: 精确数值计算。
+- `current_time`: 获取当前时间。
+- **MCP 动态工具**：如果你看到了以 get_ 开头的工具，那是动态接入的 MCP 工具，请直接调用。
 
 ## 决策规则
-1. **先判断**：回答用户问题需要什么信息？
-   - 最新/时效性信息 → `search`
-   - 内部文档/沉淀知识 → `knowledge_search`
-   - 多跳关系推理/实体消歧 → `graph_search`
-   - 回忆过往对话/历史提问 → `history_search`
-   - 精确计算 → `calculator`
-   - 询问当前时间/日期 → `current_time`
-   - 常识/翻译/逻辑推理等 → 直接作答，不调工具
-2. **按需多次调用**：一次结果不足可换更精确的查询词再次调用；如果结果被截断，调用 `read_tool_output` 读全文。
-3. **★ 并行工具调用（极其重要）**：如果你的问题涉及**多个相互独立的实体或子问题**（例如：对比 A 和 B、查询三个城市的天气、对比三款手机），**请务必在同一轮回复中，一次性输出多个 tool_calls！** 绝对不要一次只搜一个。LangGraph 会自动并发执行它们，极大节省时间。
+1. **★ 复杂任务委派（隔离上下文）**：
+   - 如果问题涉及**对比多个独立实体**（例如：对比 3 款手机），或者需要深入调查某个复杂话题，**请务必并行调用 `spawn_search_worker` 工具！**
+   - 千万不要自己去直接调 `search` 去查长文。把每个子任务委派给 `spawn_search_worker`，它们会各自在独立的上下文中完成长文检索，并只把几百字的摘要交还给你。
+   - 收到所有摘要后，你再进行最终的汇总和对比。
+2. **简单任务直接搜索**：如果只是查一个简单的天气、股价，优先使用 MCP 工具或 `search`。
+3. **按需多次调用**：一次结果不足可换更精确的查询词再次调用。
 4. **自主停止**：信息充分后立即停止调用工具，直接给出最终答案。
-5. **强制读取**：如果你在 `search` 的结果中看到了 `[系统提示: ...请调用 read_tool_output...]`，**你必须**先调用 `read_tool_output` 读取完整内容后再作答。严禁仅凭截断的摘要就回答复杂对比类、数据列举类问题。
+5. **强制读取**：如果你在 `search` 的结果中看到了 `[系统提示: ...请调用 read_tool_output...]`，**你必须**先调用 `read_tool_output` 读取完整内容后再作答。
 6. **步数预算控制**：你的总执行步数有限。如果一次并行搜索已经覆盖了核心信息，直接总结作答，不要为了追求完美反复搜索。
 
 ## 回答规则（极其重要）
@@ -73,10 +68,25 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 2. **基于工具结果回答**: 优先使用工具返回的结果。
 3. **标注来源**: 每条关键信息末尾标注来源 [1] [2] 等。
 4. **直接作答**: 收到用户问题后，直接给出最终结论。
+5. **★ 生成式 UI (Artifact)**：如果用户要求**对比数据、展示趋势、画图表**，请**不要**使用 Markdown 表格。你必须输出一段被 `<artifact>` 标签包裹的 ECharts JSON 配置。
+   格式如下：
+   <artifact>
+   {
+     "title": { "text": "图表标题" },
+     "tooltip": {},
+     "legend": { "data": ["系列1", "系列2"] },
+     "xAxis": { "type": "category", "data": ["类别A", "类别B"] },
+     "yAxis": { "type": "value" },
+     "series": [
+       { "name": "系列1", "type": "bar", "data": [120, 200] },
+       { "name": "系列2", "type": "bar", "data": [150, 300] }
+     ]
+   }
+   </artifact>
 
 ## 输出格式要求
 - **开头**: 一句话直接回答核心问题。
-- **中间**: 用无序列表 (- ) 逐条列出关键信息，每条标注来源。
+- **中间**: 用无序列表 (- ) 逐条列出关键信息，每条标注来源。如果是数据对比，请在文字下方附带 `<artifact>` 代码块。
 - **结尾**: 如有重要参考来源，用简短的「📚 参考来源」列出。
 - **格式**: 使用 Markdown，保持简洁。"""
 
@@ -90,6 +100,7 @@ REVIEWER_SYSTEM_PROMPT = """你是一个严苛的事实核查员（Fact Checker�
 1. **事实一致性**：草稿中的每个关键事实、数字、日期，必须在证据中有明确出处。严禁模型依靠自身训练数据补充细节（幻觉）。
 2. **无操作独白**：草稿必须直接给出答案，严禁包含“根据我查到的资料”、“我将调用xx”等内心独白。
 3. **不完整警告**：如果用户问了对比类问题，但草稿只回答了一半，应提示补充。
+4. **Artifact 检查**：如果草稿中包含 `<artifact>` 图表配置，请忽略它，只核查文字部分的事实是否准确。
 
 ## 输出格式 (严格 JSON)
 如果草稿完全合格，输出：
@@ -102,7 +113,7 @@ REVIEWER_SYSTEM_PROMPT = """你是一个严苛的事实核查员（Fact Checker�
 MAX_REVIEW_EVIDENCE_CHARS = 4000
 
 class ReactAgent:
-    """ReAct 自主决策 Agent（含动态模型支持与 Proposer-Reviewer 机制）"""
+    """ReAct 自主决策 Agent（含动态模型、动态 MCP 支持）"""
 
     def __init__(self, verbose: bool = False):
         api_cfg = get_api_config()
@@ -112,26 +123,22 @@ class ReactAgent:
             agent_cfg.verbose = True
 
         conn = resolve_llm_connection()
-        # 默认的全局模型
+        # 默认的全局模型，增加重试机制
         self._llm = ChatOpenAI(
             model=conn["model"],
             base_url=conn["base"],
             api_key=api_cfg.llm_api_key.get_secret_value(),
             temperature=agent_cfg.react_temperature,
             streaming=True,
+            max_retries=3,
         )
         
+        # 初始化基础工具 + 全局 MCP 工具
+        all_tools = self._get_base_tools() + _GLOBAL_MCP_TOOLS
+
         self._graph = create_react_agent(
             self._llm,
-            tools=[
-                search,
-                read_tool_output,
-                knowledge_search,
-                graph_search,
-                history_search,
-                calculator,
-                current_time,
-            ],
+            tools=all_tools,
             prompt=REACT_SYSTEM_PROMPT,
         )
         
@@ -139,15 +146,57 @@ class ReactAgent:
         if self._recursion_limit < 40:
             self._recursion_limit = 40
 
+    def _get_base_tools(self):
+        """获取所有本地硬编码的工具"""
+        return [
+            spawn_search_worker,
+            search,
+            read_tool_output,
+            knowledge_search,
+            graph_search,
+            history_search,
+            calculator,
+            current_time,
+        ]
+
+    async def _load_dynamic_mcp(self, mcp_config: dict):
+        """动态拉取前端下发的 MCP 工具，并加入缓存"""
+        if not mcp_config:
+            return _GLOBAL_MCP_TOOLS
+            
+        config_key = hashlib.md5(json.dumps(mcp_config, sort_keys=True).encode()).hexdigest()
+        if config_key in _MCP_TOOLS_CACHE:
+            return _MCP_TOOLS_CACHE[config_key]
+            
+        try:
+            from langchain_mcp_adapters.client import MultiServerMCPClient
+            print(f"[MCP] 动态加载前端配置: {mcp_config}")
+            client = MultiServerMCPClient(mcp_config)
+            tools = await client.get_tools()
+            _MCP_TOOLS_CACHE[config_key] = tools
+            return tools
+        except Exception as e:
+            print(f"[MCP] 动态加载失败: {e}")
+            return _GLOBAL_MCP_TOOLS
+
     def _get_active_graph(
         self, 
         model_override: Optional[str] = None,
         llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        mcp_tools: Optional[list] = None
     ):
-        """动态获取 Graph：如果前端传了自定义配置，现场创建一个新的"""
+        """动态获取 Graph"""
+        # 合并工具
+        active_mcp = mcp_tools if mcp_tools is not None else _GLOBAL_MCP_TOOLS
+        all_tools = self._get_base_tools() + active_mcp
+
         if not (model_override or llm_provider or api_base or api_key):
+            # 如果没有模型覆盖，但工具变了，需要重新创建 Graph
+            if mcp_tools and len(active_mcp) > len(_GLOBAL_MCP_TOOLS):
+                dynamic_graph = create_react_agent(self._llm, tools=all_tools, prompt=REACT_SYSTEM_PROMPT)
+                return dynamic_graph, self._llm
             return self._graph, self._llm
             
         api_cfg = get_api_config()
@@ -163,19 +212,12 @@ class ReactAgent:
             api_key=final_key,
             temperature=get_agent_config().react_temperature,
             streaming=True,
+            max_retries=3,
         )
         
         dynamic_graph = create_react_agent(
             dynamic_llm,
-            tools=[
-                search,
-                read_tool_output,
-                knowledge_search,
-                graph_search,
-                history_search,
-                calculator,
-                current_time,
-            ],
+            tools=all_tools,
             prompt=REACT_SYSTEM_PROMPT,
         )
         return dynamic_graph, dynamic_llm
@@ -282,12 +324,22 @@ class ReactAgent:
         llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
+        mcp_config: Optional[dict] = None,
     ) -> GeneratedAnswer:
         start = time.perf_counter()
         set_current_user_id(user_id or "")
         reset_tool_counts()
         
-        active_graph, active_llm = self._get_active_graph(model_override, llm_provider, api_base, api_key)
+        dynamic_mcp_tools = await self._load_dynamic_mcp(mcp_config)
+        active_graph, active_llm = self._get_active_graph(model_override, llm_provider, api_base, api_key, dynamic_mcp_tools)
+        
+        api_cfg = get_api_config()
+        preset = PROVIDER_PRESETS.get((llm_provider or "").lower(), {})
+        final_base = api_base or preset.get("api_base", "https://api.openai.com/v1")
+        final_key = api_key or api_cfg.llm_api_key.get_secret_value()
+        final_model = model_override or preset.get("model", "gpt-4o-mini")
+        set_llm_context(final_key, final_base, final_model)
+
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
 
@@ -302,7 +354,6 @@ class ReactAgent:
             if not final_text:
                 return await self._fallback(user_query, history, start, confidence=0.5)
 
-            # 条件化审核（非流式）
             evidence = self._extract_evidence(messages)
             if evidence.strip():
                 final_text = await self._review_and_correct(active_llm, user_query, final_text, evidence)
@@ -340,11 +391,21 @@ class ReactAgent:
         llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
+        mcp_config: Optional[dict] = None,
     ):
         set_current_user_id(user_id or "")
         reset_tool_counts()
 
-        active_graph, active_llm = self._get_active_graph(model_override, llm_provider, api_base, api_key)
+        dynamic_mcp_tools = await self._load_dynamic_mcp(mcp_config)
+        active_graph, active_llm = self._get_active_graph(model_override, llm_provider, api_base, api_key, dynamic_mcp_tools)
+        
+        api_cfg = get_api_config()
+        preset = PROVIDER_PRESETS.get((llm_provider or "").lower(), {})
+        final_base = api_base or preset.get("api_base", "https://api.openai.com/v1")
+        final_key = api_key or api_cfg.llm_api_key.get_secret_value()
+        final_model = model_override or preset.get("model", "gpt-4o-mini")
+        set_llm_context(final_key, final_base, final_model)
+
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
         
@@ -370,8 +431,6 @@ class ReactAgent:
 
         if final_text and messages:
             evidence = self._extract_evidence(messages)
-            
-            # 条件化审核（流式）
             if evidence.strip():
                 yield {"event": "progress", "data": {"node": "reviewer", "message": "正在进行事实与幻觉核查..."}}
                 revised_text = await self._review_and_correct(active_llm, user_query, final_text, evidence)

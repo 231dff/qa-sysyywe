@@ -1,9 +1,10 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types";
+import ReactECharts from "echarts-for-react"; // ★ 引入 ECharts
 
 export default function MessageBubble({
   msg,
@@ -14,24 +15,61 @@ export default function MessageBubble({
 }) {
   const isUser = msg.role === "user";
 
+  // ★ 解析文本中的 <artifact> 标签
+  const parseContent = (text: string) => {
+    const artifactRegex = /<artifact>([\s\S]*?)<\/artifact>/g;
+    const matches = [...text.matchAll(artifactRegex)];
+    
+    let cleanText = text;
+    const charts: any[] = [];
+
+    matches.forEach((match) => {
+      try {
+        const chartConfig = JSON.parse(match[1].trim());
+        charts.push(chartConfig);
+        // 将图表 JSON 从原文本中移除，避免渲染出乱码
+        cleanText = cleanText.replace(match[0], "");
+      } catch (e) {
+        console.error("解析 Artifact JSON 失败", e);
+      }
+    });
+
+    return { cleanText, charts };
+  };
+
+  const { cleanText, charts } = parseContent(msg.content);
+
   return (
     <div className={`flex w-full mb-6 ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex flex-col ${isUser ? "items-end max-w-[85%]" : "items-start w-full"}`}>
         
         {/* 消息主体 */}
         {isUser ? (
-          // 用户气泡：浅灰色，大圆角，右侧对齐
           <div className="bg-[#f4f4f4] text-[#1a1a1a] px-5 py-3 rounded-2xl rounded-tr-sm text-[15px] leading-relaxed shadow-sm">
             {msg.content}
           </div>
         ) : (
-          // AI 气泡：无背景，纯文本排版，极致阅读体验
           <div className="w-full text-[#1a1a1a] text-[15px] leading-[1.8]">
-            <div className="prose prose-gray max-w-none prose-p:my-2 prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100 prose-table:text-[14px]">
+            <div className="prose prose-gray max-w-none prose-p:my-2 prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {msg.content}
+                {cleanText}
               </ReactMarkdown>
             </div>
+
+            {/* ★ 渲染图表 */}
+            {charts.length > 0 && (
+              <div className="mt-4 flex flex-col gap-4 w-full">
+                {charts.map((config, idx) => (
+                  <div key={idx} className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm w-full">
+                    <ReactECharts 
+                      option={config} 
+                      style={{ height: '350px', width: '100%' }} 
+                      notMerge={true}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
             
             {/* 光标动画 */}
             {isStreaming && (
@@ -40,7 +78,7 @@ export default function MessageBubble({
           </div>
         )}
 
-        {/* 来源与 Meta 信息 (仅 AI 消息显示) */}
+        {/* 来源与 Meta 信息 */}
         {!isUser && !isStreaming && (
           <div className="mt-3 flex flex-col gap-2">
             {msg.sources && msg.sources.length > 0 && (

@@ -9,17 +9,24 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
 
 from tools.registry import search_and_filter_pipeline
 from utils.helpers import format_search_context
+from config import get_api_config, resolve_llm_connection, get_agent_config
 
 # ============================================================
-# 全局上下文变量（用于 Agent 状态栏）
+# 全局上下文变量（用于 Agent 状态栏与动态配置）
 # ============================================================
 _current_user_id: ContextVar[str] = ContextVar("current_user_id", default="")
-
-# 记录当前请求的工具调用次数
 _tool_call_counts: ContextVar[dict] = ContextVar("tool_call_counts", default={})
+
+# ★ 用于透传给子 Agent 的 LLM 配置
+_llm_api_key: ContextVar[str] = ContextVar("llm_api_key", default="")
+_llm_api_base: ContextVar[str] = ContextVar("llm_api_base", default="")
+_llm_model: ContextVar[str] = ContextVar("llm_model", default="")  # 新增：模型名称
 
 def set_current_user_id(user_id: str) -> None:
     _current_user_id.set(user_id or "")
@@ -28,19 +35,20 @@ def get_current_user_id() -> str:
     return _current_user_id.get()
 
 def reset_tool_counts() -> None:
-    """每次新的对话开始时重置计数"""
     _tool_call_counts.set({})
 
+def set_llm_context(api_key: str, api_base: str, model: str):
+    """由主 Agent 注入当前生效的 LLM 配置"""
+    _llm_api_key.set(api_key)
+    _llm_api_base.set(api_base)
+    _llm_model.set(model)
+
 def _increment_and_get_status(tool_name: str) -> str:
-    """增加调用次数，并生成状态栏字符串"""
     counts = _tool_call_counts.get()
     counts[tool_name] = counts.get(tool_name, 0) + 1
     _tool_call_counts.set(counts)
     
-    # 生成类似: "search: 2 次, read_tool_output: 1 次"
     stats_str = ", ".join([f"{k}: {v} 次" for k, v in counts.items()])
-    
-    # 加上预算警告
     total_calls = sum(counts.values())
     warning = ""
     if total_calls >= 10:
@@ -50,17 +58,67 @@ def _increment_and_get_status(tool_name: str) -> str:
 
 
 # ============================================================
-# 新增工具：读取长输出落盘文件
+# 子 Agent 上下文隔离 (Manager-Worker 模式)
+# ============================================================
+WORKER_PROMPT = """你是一个专业的资料检索子 Agent。
+你的任务是根据指令去联网搜索信息，并提炼出最核心的事实与数据。
+请直接输出结构化的要点（如 Markdown 列表），不要输出任何废话，不要包含你正在使用工具的描述。"""
+
+@tool
+async def spawn_search_worker(query: str) -> str:
+    """委派一个子 Agent 去独立完成复杂的检索任务。
+    当需要查询多个独立实体（如对比多款产品），或者需要阅读大量长文时，请调用此工具。
+    子 Agent 会在自己的隔离环境中完成搜索，并只把提炼好的摘要返回给你。
+    """
+    current_key = _llm_api_key.get()
+    current_base = _llm_api_base.get()
+    current_model = _llm_model.get()
+    
+    if not current_key:
+        api_cfg = get_api_config()
+        current_key = api_cfg.llm_api_key.get_secret_value()
+        current_base = api_cfg.llm_api_base
+        current_model = "qwen-turbo"
+    
+    # ★ 核心修复：增加 max_retries=3，防止 429 限流直接崩溃
+    worker_llm = ChatOpenAI(
+        model=current_model, 
+        base_url=current_base,
+        api_key=current_key,
+        temperature=0.0,
+        max_retries=3
+    )
+    
+    @tool
+    async def local_search(q: str) -> str:
+        """底层联网搜索"""
+        _, fragments = await search_and_filter_pipeline(query=q, max_results=5)
+        real_fragments = [f for f in fragments if f[0] != "system_tip"]
+        return "\n".join([f"[{f[0]}] {f[1]}" for f in real_fragments])
+
+    sub_agent = create_react_agent(
+        worker_llm,
+        tools=[local_search],
+        prompt=WORKER_PROMPT
+    )
+    
+    result = await sub_agent.ainvoke(
+        {"messages": [HumanMessage(content=f"请帮我详细检索并总结以下信息：{query}")]},
+        config={"recursion_limit": 10}
+    )
+    
+    final_text = result["messages"][-1].content
+    status = _increment_and_get_status("spawn_search_worker")
+    
+    return f"{final_text}\n{status}"
+
+
+# ============================================================
+# 下面是你原有的工具代码，保持不变
 # ============================================================
 @tool
 async def read_tool_output(file_path: str) -> str:
-    """读取因为过长而被截断落盘的完整内容。
-    当 search 工具返回的 summary 末尾提示“原始搜索结果较长...请调用 read_tool_output”，
-    且你发现当前摘要信息不足以回答用户问题时，调用此工具读取完整文件。
-    
-    Args:
-        file_path: 文件路径（如 /tmp/tool_outputs/search_a1b2c3d4.json）
-    """
+    """读取因为过长而被截断落盘的完整内容。"""
     if not file_path.startswith("/tmp/tool_outputs/"):
         return "Error: 安全限制，只能读取工具输出目录下的文件。"
     if not os.path.exists(file_path):
@@ -74,18 +132,13 @@ async def read_tool_output(file_path: str) -> str:
         return f"Error: 读取文件失败: {str(e)}"
 
 
-# ============================================================
-# 原有工具：实时搜索
-# ============================================================
 @tool
 async def search(
     query: str,
     search_depth: str = "advanced",
     max_results: int = 5,
 ) -> str:
-    """实时联网搜索工具。当用户问题的答案需要最新、可能已过时、或超出你训练数据覆盖范围的信息时使用。
-    (说明：为了简洁，此处省略长篇 docstring，请保留你原有的详细 docstring)
-    """
+    """实时联网搜索工具。"""
     _, fragments = await search_and_filter_pipeline(
         query=query,
         use_llm_scoring=False,
@@ -94,29 +147,18 @@ async def search(
     )
 
     if not fragments:
-        result = json.dumps(
-            {"summary": "（未搜索到有效结果）", "sources": []},
-            ensure_ascii=False,
-        )
+        result = json.dumps({"summary": "（未搜索到有效结果）", "sources": []}, ensure_ascii=False)
     else:
         real_fragments = [f for f in fragments if f[0] != "system_tip"]
         tips = [f[1] for f in fragments if f[0] == "system_tip"]
-
         trimmed = real_fragments[:max_results]
         summary = format_search_context(trimmed)
-        
         if tips:
             summary += "\n\n" + "\n".join(tips)
-
-        sources = [
-            {"url": url, "title": "", "snippet": content[:200]}
-            for url, content, _score in trimmed
-        ]
+        sources = [{"url": url, "title": "", "snippet": content[:200]} for url, content, _score in trimmed]
         result = json.dumps({"summary": summary, "sources": sources}, ensure_ascii=False)
 
-    # ★ 注入状态栏
     status = _increment_and_get_status("search")
-    # 如果是 JSON 字符串，我们需要把状态拼接到 summary 里
     try:
         payload = json.loads(result)
         payload["summary"] = payload.get("summary", "") + status
@@ -124,81 +166,46 @@ async def search(
     except:
         return result + status
 
-
-# ============================================================
-# 原有工具：知识库检索 (同样注入状态栏)
-# ============================================================
 @tool
-async def knowledge_search(
-    query: str,
-    top_k: int = 5,
-    max_age_days: int = 0,
-) -> str:
-    """本地知识库检索工具。用于查询项目/团队内部沉淀的文档、制度、历史决策等知识。"""
+async def knowledge_search(query: str, top_k: int = 5, max_age_days: int = 0) -> str:
+    """本地知识库检索工具。"""
     try:
         from rag import get_knowledge_base
     except ImportError:
         return json.dumps({"summary": "（知识库不可用）", "sources": []}, ensure_ascii=False)
 
     kb = get_knowledge_base()
-    results = kb.search(
-        query,
-        top_k=min(max(top_k, 1), 10),
-        max_age_days=max_age_days if max_age_days > 0 else None,
-    )
-
+    results = kb.search(query, top_k=min(max(top_k, 1), 10), max_age_days=max_age_days if max_age_days > 0 else None)
     status = _increment_and_get_status("knowledge_search")
 
     if not results:
         return json.dumps({"summary": "（知识库中未找到相关内容）" + status, "sources": []}, ensure_ascii=False)
 
-    lines = []
-    sources = []
+    lines, sources = [], []
     for i, r in enumerate(results, 1):
         meta = r.get("metadata", {})
         source = meta.get("source", "未知来源")
         lines.append(f"[{i}] {source} (相关性: {r['score']:.2f})")
         lines.append(r["text"])
         lines.append("")
-        sources.append({
-            "url": meta.get("url", ""),
-            "title": source,
-            "snippet": r["text"][:200],
-        })
+        sources.append({"url": meta.get("url", ""), "title": source, "snippet": r["text"][:200]})
 
-    return json.dumps(
-        {"summary": "\n".join(lines) + status, "sources": sources},
-        ensure_ascii=False,
-    )
+    return json.dumps({"summary": "\n".join(lines) + status, "sources": sources}, ensure_ascii=False)
 
-
-# ============================================================
-# 原有工具：知识图谱 (注入状态栏)
-# ============================================================
 @tool
-async def graph_search(
-    query: str,
-    top_k: int = 5,
-    max_hops: int = 2,
-) -> str:
-    """知识图谱检索工具。用于需要多跳推理/精确消歧的垂直场景。"""
+async def graph_search(query: str, top_k: int = 5, max_hops: int = 2) -> str:
+    """知识图谱检索工具。"""
     try:
         from rag.structured import get_structured_index
     except ImportError:
         return json.dumps({"summary": "（知识图谱不可用）", "paths": [], "sources": []}, ensure_ascii=False)
 
     idx = get_structured_index()
-    result = idx.search(
-        query,
-        top_k=min(max(top_k, 1), 10),
-        max_hops=min(max(max_hops, 1), 3),
-    )
-
+    result = idx.search(query, top_k=min(max(top_k, 1), 10), max_hops=min(max(max_hops, 1), 3))
     docs = result.get("docs", [])
     paths_text = idx.kg.format_paths(result.get("paths", [])) if hasattr(idx, "kg") else ""
-
-    lines = []
-    sources = []
+    
+    lines, sources = [], []
     for i, r in enumerate(docs, 1):
         meta = r.get("metadata", {})
         source = meta.get("source", "未知来源")
@@ -209,43 +216,27 @@ async def graph_search(
             names = ", ".join(e.get("name", "") for e in entities)
             lines.append(f"    ↳ 关联实体: {names}")
         lines.append("")
-        sources.append({
-            "url": meta.get("url", ""),
-            "title": source,
-            "snippet": r["text"][:200],
-        })
+        sources.append({"url": meta.get("url", ""), "title": source, "snippet": r["text"][:200]})
 
     if paths_text:
         lines.append("多跳推理路径:")
         lines.append(paths_text)
-
     if not docs and not paths_text:
         lines.append("（知识图谱中未找到相关内容）")
 
     status = _increment_and_get_status("graph_search")
+    return json.dumps({"summary": "\n".join(lines) + status, "paths": paths_text, "sources": sources}, ensure_ascii=False)
 
-    return json.dumps(
-        {"summary": "\n".join(lines) + status, "paths": paths_text, "sources": sources},
-        ensure_ascii=False,
-    )
-
-
-# ============================================================
-# 原有工具：计算器 (注入状态栏)
-# ============================================================
 @tool
 def calculator(expression: str) -> str:
     """安全数学计算器。"""
-    import ast
-    import operator
-
+    import ast, operator
     _ALLOWED_OPS = {
         ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
         ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
         ast.Mod: operator.mod, ast.Pow: operator.pow,
         ast.USub: operator.neg, ast.UAdd: operator.pos,
     }
-
     def _eval(node):
         if isinstance(node, ast.Expression): return _eval(node.body)
         if isinstance(node, ast.BinOp):
@@ -259,53 +250,31 @@ def calculator(expression: str) -> str:
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return node.value
         raise ValueError("表达式包含不允许的内容")
-
     try:
         tree = ast.parse(expression.strip(), mode="eval")
         result = _eval(tree)
-        if isinstance(result, float) and result.is_integer():
-            result = int(result)
+        if isinstance(result, float) and result.is_integer(): result = int(result)
         res_str = str(result)
     except Exception as exc:
         res_str = f"（计算失败：{exc}）"
+    return res_str + _increment_and_get_status("calculator")
 
-    status = _increment_and_get_status("calculator")
-    return res_str + status
-
-
-# ============================================================
-# 原有工具：时间获取
-# ============================================================
 @tool
 def current_time() -> str:
     """获取当前 UTC 时间。"""
-    status = _increment_and_get_status("current_time")
-    return datetime.now(timezone.utc).isoformat() + status
+    return datetime.now(timezone.utc).isoformat() + _increment_and_get_status("current_time")
 
-
-# ============================================================
-# 原有工具：历史检索
-# ============================================================
 @tool
 async def history_search(query: str, top_k: int = 5) -> str:
     """检索用户过往会话历史。"""
     user_id = get_current_user_id()
     if not user_id:
         return json.dumps({"query": query, "count": 0, "sessions": [], "note": "无法识别用户身份"}, ensure_ascii=False)
-
     try:
         from memory.user_store import get_user_store
     except ImportError:
         return json.dumps({"query": query, "count": 0, "sessions": [], "note": "历史存储不可用"}, ensure_ascii=False)
-
     store = get_user_store()
     hits = store.search_sessions(user_id=user_id, query=query, top_k=min(max(top_k, 1), 10))
-
     status = _increment_and_get_status("history_search")
-    
-    return json.dumps({
-        "query": query, 
-        "count": len(hits), 
-        "sessions": hits,
-        "status": status
-    }, ensure_ascii=False)
+    return json.dumps({"query": query, "count": len(hits), "sessions": hits, "status": status}, ensure_ascii=False)

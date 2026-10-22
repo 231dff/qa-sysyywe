@@ -8,7 +8,6 @@ import { generateSessionId, getOrCreateUserId, getSession, deleteSession as apiD
 
 const LOCAL_SESSIONS_KEY = "qa_local_sessions_v1";
 
-// ── 本地存储辅助函数 ──
 const getLocalSessions = (): SessionSummary[] => {
   if (typeof window === "undefined") return [];
   try {
@@ -84,13 +83,11 @@ export default function ChatProvider({
       setSessionsLoading(true);
       try {
         const info = await getSession(sid, userId);
-        const history: ChatMessage[] = (info.history || []).map(
-          (m, i) => ({
-            id: `h_${i}`,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })
-        );
+        const history: ChatMessage[] = (info.history || []).map((m, i) => ({
+          id: `h_${i}`,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }));
         setMessages(history);
         setSessionId(sid);
         sse.reset();
@@ -143,7 +140,6 @@ export default function ChatProvider({
     async (content: string) => {
       if (!content.trim() || !userId) return;
 
-      // 1. 更新前端会话列表
       let currentSessions = getLocalSessions();
       const exists = currentSessions.find((s) => s.session_id === sessionId);
 
@@ -164,7 +160,6 @@ export default function ChatProvider({
       saveLocalSessions(currentSessions);
       setSessions(currentSessions);
 
-      // 2. 发送 SSE 请求
       const userMsg: ChatMessage = {
         id: `u_${msgCounter.current++}`,
         role: "user",
@@ -172,25 +167,27 @@ export default function ChatProvider({
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      // ★ 新增：从 localStorage 读取自定义模型配置
+      // ★ 新增：从 localStorage 读取自定义模型配置和 MCP 配置
       let customConfig: any = {};
+      let customMcp: any = {};
       try {
         const saved = localStorage.getItem("custom_llm_config");
         if (saved) customConfig = JSON.parse(saved);
+        const savedMcp = localStorage.getItem("custom_mcp_config");
+        if (savedMcp) customMcp = JSON.parse(savedMcp);
       } catch (e) {
-        console.error("解析本地模型配置失败", e);
+        console.error("解析本地配置失败", e);
       }
 
       await sse.startStream({
         query: content,
         session_id: sessionId,
         user_id: userId,
-        // ★ 如果用户填了自定义配置，就用自定义的；否则用默认配置
         model: customConfig.model || settings.model,
         llm_provider: customConfig.provider || undefined,
         api_base: customConfig.apiBase || undefined,
         api_key: customConfig.apiKey || undefined,
-        
+        mcp_config: Object.keys(customMcp).length > 0 ? customMcp : undefined,
         search_depth: settings.searchDepth,
         top_k: settings.topK,
       });
@@ -198,7 +195,6 @@ export default function ChatProvider({
     [sessionId, userId, settings, sse]
   );
 
-  // 监听 SSE 状态变化
   const doneRef = useRef(false);
   useEffect(() => {
     if (sse.status === "done" && !doneRef.current && sse.meta) {
@@ -226,7 +222,6 @@ export default function ChatProvider({
     } else if (sse.status !== "done" && sse.status !== "error") {
       doneRef.current = false;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sse.status]);
 
   return (

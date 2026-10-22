@@ -68,9 +68,10 @@ async def run_stream_sse(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
     model_override: Optional[str] = None,
-    llm_provider: Optional[str] = None,  # ★ 新增
-    api_base: Optional[str] = None,      # ★ 新增
-    api_key: Optional[str] = None,       # ★ 新增
+    llm_provider: Optional[str] = None,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+    mcp_config: Optional[dict] = None, # ★ 新增
     search_depth_override: Optional[str] = None,
     top_k_override: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
@@ -79,8 +80,6 @@ async def run_stream_sse(
     """
     agent_cfg = get_agent_config()
     tdai_cfg = get_tdai_config()
-
-    # ★ 移除了全局 api_cfg.llm_model 的覆写，改为安全透传
 
     # ── 会话初始化 ──
     if session_id is None:
@@ -113,16 +112,17 @@ async def run_stream_sse(
         sources: list[Source] = []
         revised_text = None
 
-        # ★ 核心透传：将模型配置和搜索参数全部传给 ReactAgent
+        # ★ 核心透传：将模型配置、搜索参数、MCP 配置全部传给 ReactAgent
         async for event in agent._react.astream_events(
             user_query,
             history,
             memory_context=memory_context,
             user_id=user_id,
-            model_override=model_override,  # ★
-            llm_provider=llm_provider,      # ★
-            api_base=api_base,              # ★
-            api_key=api_key,                # ★
+            model_override=model_override,
+            llm_provider=llm_provider,
+            api_base=api_base,
+            api_key=api_key,
+            mcp_config=mcp_config, # ★ 透传
         ):
             kind = event.get("event", "")
             data = event.get("data", {})
