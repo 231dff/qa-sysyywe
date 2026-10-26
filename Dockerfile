@@ -10,16 +10,20 @@ ENV TZ=Asia/Shanghai \
     LC_ALL=C.UTF-8 \
     PIP_NO_CACHE_DIR=1
 
-# 基础工具
+# 基础工具（★ 增加了 git，用于从 GitHub 拉取 sqlite-memory-mcp）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # 先装依赖（利用 layer cache）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ★ 使用清华镜像源加速并避免 SSL 报错
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
 
 # 再拷代码
 COPY . .

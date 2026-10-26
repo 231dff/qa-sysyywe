@@ -30,3 +30,26 @@ kubectl rollout status deployment/qa-frontend -n $ns --timeout=180s
 
 Write-Host "`n==> Deployment Done! Current Pod status:" -ForegroundColor Green
 kubectl get pods -n $ns
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -387,24 +387,26 @@ async def list_sessions(user_id: str = ""):
 
 @app.get("/api/session/{session_id}")
 async def get_session(session_id: str, user_id: Optional[str] = None):
+    agent = get_agent()
+    
+    # ★ 核心修复 1：优先从内存中读取（即使还在流式生成中，内存里也会有数据）
+    if session_id in agent._sessions:
+        history = agent.get_history(session_id)
+        return SessionInfo(session_id=session_id, history=history, active=True)
+
+    # ★ 核心修复 2：如果内存没有，再去查持久化存储（比如 Redis 或 文件）
     if user_id:
         store = get_user_store()
         history = store.get_history(user_id, session_id)
         if history:
             return SessionInfo(session_id=session_id, history=history, active=False)
 
-    agent = get_agent()
-    history = agent.get_history(session_id)
-    active = session_id in agent._sessions
-    
-    # 如果历史记录为空，返回友好提示
-    if not history:
-        history = [{
-            "role": "assistant", 
-            "content": "⚠️ 该会话的上下文记录已过期或已清理。您可以继续在此提问，或者开启一个新的会话。"
-        }]
-
-    return SessionInfo(session_id=session_id, history=history, active=active)
+    # ★ 核心修复 3：兜底：真的彻底没有了
+    return SessionInfo(
+        session_id=session_id, 
+        history=[{"role": "assistant", "content": "⚠️ 该会话的上下文记录已过期或已清理。您可以继续在此提问，或者开启一个新的会话。"}], 
+        active=False
+    )
 
 
 @app.delete("/api/session/{session_id}")

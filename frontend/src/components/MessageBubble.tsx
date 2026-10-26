@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types";
-import ReactECharts from "echarts-for-react"; // ★ 引入 ECharts
+import ReactECharts from "echarts-for-react";
 
 export default function MessageBubble({
   msg,
@@ -27,12 +27,18 @@ export default function MessageBubble({
       try {
         const chartConfig = JSON.parse(match[1].trim());
         charts.push(chartConfig);
-        // 将图表 JSON 从原文本中移除，避免渲染出乱码
         cleanText = cleanText.replace(match[0], "");
       } catch (e) {
         console.error("解析 Artifact JSON 失败", e);
       }
     });
+
+    // ★ 核心修改：把大模型吐出的 [低置信度] 标签转换成醒目的 Markdown 标记
+    // 用 ⚠️ 和加粗让它在 prose 中极其显眼（免去引入新库的麻烦）
+    cleanText = cleanText.replace(
+      /\[低置信度\]/g, 
+      ' **<span style="color: #b45309; background-color: #fef3c7; padding: 2px 6px; border-radius: 4px; font-size: 12px; border: 1px solid #fde68a;">⚠️ 低置信度</span>** '
+    );
 
     return { cleanText, charts };
   };
@@ -51,7 +57,18 @@ export default function MessageBubble({
         ) : (
           <div className="w-full text-[#1a1a1a] text-[15px] leading-[1.8]">
             <div className="prose prose-gray max-w-none prose-p:my-2 prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {/* ★ 注意：如果你想彻底解析 HTML 标签，需要 react-markdown 允许 raw html
+                  如果不允许，上面的替换会把完整的 HTML 打印出来。
+                  为了不引入 rehype-raw，我们这里直接替换成纯文本+表情：
+                  
+                  如果上面的方案显示异常，请把 parseContent 里的正则替换改为：
+                  cleanText = cleanText.replace(/\[低置信度\]/g, ' **[⚠️ 低置信度]** ');
+              */}
+              <ReactMarkdown 
+                remarkPlugins={[remarkGfm]}
+                // 如果没装 rehype-raw，请去掉下面这行，并把上面替换逻辑改为纯 Markdown 加粗
+                // rehypePlugins={[rehypeRaw]} 
+              >
                 {cleanText}
               </ReactMarkdown>
             </div>

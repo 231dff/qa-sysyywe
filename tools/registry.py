@@ -3,8 +3,9 @@
 按职责单一原则注册所有工具：
 1. Tavily 搜索
 2. LLM 查询改写
-3. LLM 相关性打分
+3. LLM 相关性打分 (保留作为备用)
 4. LLM 降级回答
+5. 深度检索流水线 (多路召回 + 流式网页精读 + Rerank)
 """
 from __future__ import annotations
 
@@ -42,6 +43,10 @@ from utils.metrics import (
     record_search,
     record_tokens,
 )
+
+# ★ 引入新增的流式网页提取和重排模块
+from tools.web_extractor import stream_extract_contents, chunk_text
+from tools.reranker import rerank_chunks
 
 # ============================================================
 # 工具元数据注册表
@@ -260,7 +265,7 @@ async def rewrite_query(
         )
 
 # ============================================================
-# Tool 3: LLM 相关性打分
+# Tool 3: LLM 相关性打分 (备用)
 # ============================================================
 RELEVANCE_SYSTEM_PROMPT = """你是一个搜索结果质量评估专家。对每条搜索结果与用户问题的相关性打分 (0-1):
 
@@ -432,109 +437,84 @@ async def generate_fallback_answer(
         return f"抱歉，当前无法生成回答。请稍后重试。（错误: {str(exc)}）"
 
 # ============================================================
-# 组合工具: 搜索 + 去重 + 打分 + 裁剪 + 落盘
+# Tool 5: 组合工具 - 生产级 DeepSeek 搜索机制
 # ============================================================
 async def search_and_filter_pipeline(
     query: str,
     deduplicator: Optional[URLDeduplicator] = None,
-    use_llm_scoring: bool = False,
+    use_llm_scoring: bool = False, # 保留参数，但现在主要靠 Rerank
     search_depth: Optional[str] = None,
     max_results: Optional[int] = None,
 ) -> tuple[list[SearchResult], list[tuple[str, str, float]]]:
     """
-    完整的搜索+过滤流水线:
-    1. Tavily 实时搜索
-    2. URL 去重
-    3. (可选) LLM 相关性打分 — 默认关闭，用 Tavily 原始分数省 1 次 LLM 调用
-    4. Top-K + Token 裁剪
-    5. (新增) 长内容落盘保存机制
+    生产级 DeepSeek 搜索机制：
+    1. Query 拆解并发多路召回
+    2. ★ 流式网页精读抓取 (带时间预算)
+    3. 细粒度段落切分 (Chunking)
+    4. Rerank 语义重排
+    5. 组装精炼上下文池
     """
     agent_cfg = get_agent_config()
-
     if deduplicator is None:
         deduplicator = URLDeduplicator(window_size=agent_cfg.dedup_window)
 
-    # Step 1: 搜索
-    search_resp = await tavily_search(
-        query,
-        max_results=max_results,
-        search_depth=search_depth,
-    )
-    if search_resp.error:
-        if agent_cfg.verbose:
-            print(f"[搜索异常] {search_resp.error}")
-        return [], []
+    # ---- Step 1: 多查询拆解与并发搜索 ----
+    rewritten = await rewrite_query(query)
+    search_queries = [rewritten.rewritten] + (rewritten.sub_queries or [])
+    search_queries = list(dict.fromkeys(search_queries))[:3] 
+    
+    all_results = []
+    search_tasks = [tavily_search(q, max_results=5, search_depth=search_depth) for q in search_queries]
+    responses = await asyncio.gather(*search_tasks)
+    
+    for resp in responses:
+        if not resp.error:
+            all_results.extend(resp.results)
 
-    all_results = search_resp.results
-
-    # Step 2: URL 去重
+    # ---- Step 2: URL 去重 ----
     deduped: list[SearchResult] = []
     for r in all_results:
         if not deduplicator.is_duplicate(r.url):
             deduped.append(r)
             deduplicator.add(r.url)
 
-    if agent_cfg.verbose:
-        removed = len(all_results) - len(deduped)
-        print(f"[去重] {len(all_results)} → {len(deduped)} (移除 {removed} 条重复)")
-
     if not deduped:
         return [], []
 
-    # Step 3: 相关性打分 (可选，默认跳过以降低延迟)
-    score_map: dict[str, float] = {}
-    if use_llm_scoring:
-        scores = await score_relevance(query, deduped)
-        for s in scores.results:
-            score_map[s.url] = s.relevance
-    else:
-        # 直接使用 Tavily 自带的分数
+    # ---- Step 3: ★ 流式网页精读抓取 (带时间预算) ----
+    urls_to_fetch = [r.url for r in deduped[:6]]
+    all_chunks = []
+    
+    if agent_cfg.verbose: 
+        print(f"[Pipeline] 开始流式抓取 {len(urls_to_fetch)} 个网页，时间预算 6.0s...")
+    
+    # 通过异步生成器边抓取边处理
+    async for _, content in stream_extract_contents(urls_to_fetch, time_budget=6.0):
+        # 拿到一个网页正文，立刻切片进入候选池
+        chunks = chunk_text(content, chunk_size=600, overlap=100)
+        for c in chunks:
+            # 这里可以用 source_url 标识，但由于生成器简化了返回值，直接用 placeholder
+            all_chunks.append({"url": "web_source", "title": "", "text": c})
+
+    # 兜底：如果所有网页都抓取失败（比如全部超时），降级使用 Snippet
+    if not all_chunks:
+        if agent_cfg.verbose: print("[Pipeline] 网页抓取全部失败，降级使用搜索引擎 Snippet")
         for r in deduped:
-            score_map[r.url] = r.score if r.score else 0.5
-
-    # Step 4: Top-K + Token 裁剪
+            all_chunks.append({"url": r.url, "title": r.title, "text": r.content, "score": r.score or 0.5})
+        top_chunks = all_chunks[:agent_cfg.top_k_fragments]
+    else:
+        # ---- Step 4: Rerank 重排序 ----
+        if agent_cfg.verbose: print(f"[Pipeline] 收集到 {len(all_chunks)} 个段落，开始 Rerank 重排...")
+        # 使用本地轻量级 TF-IDF Rerank
+        top_chunks = rerank_chunks(query, all_chunks, top_k=agent_cfg.top_k_fragments)
+    
+    # ---- Step 5: 组装最终的上下文片段 ----
     fragments: list[tuple[str, str, float]] = []
-    for r in deduped:
-        rel_score = score_map.get(r.url, r.score)
-        fragments.append((r.url, r.content, rel_score))
-
-    trimmed = trim_context(
-        fragments,
-        max_tokens=agent_cfg.max_context_tokens,
-        top_k=agent_cfg.top_k_fragments,
-    )
+    for c in top_chunks:
+        # 组装格式：(URL, 文本, 分数)
+        fragments.append((c["url"], c["text"], c.get("score", 0.5)))
 
     if agent_cfg.verbose:
-        before_tokens = sum(len(f[1]) // 2 for f in fragments)
-        after_tokens = sum(len(f[1]) // 2 for f in trimmed)
-        reduction = (1 - after_tokens / max(before_tokens, 1)) * 100
-        print(f"[裁剪] {len(fragments)}条({before_tokens}tok) → {len(trimmed)}条({after_tokens}tok), 减少 {reduction:.0f}% token")
+        print(f"[Pipeline] 检索流程完成，注入 {len(fragments)} 个精炼段落。")
 
-    # ---- Step 5: 新增：长输出持久化落盘机制 ----
-    total_chars = sum(len(r.content) for r in deduped)
-    file_path_str = ""
-    
-    if total_chars > 3000:
-        TOOL_OUTPUT_DIR = "/tmp/tool_outputs"
-        os.makedirs(TOOL_OUTPUT_DIR, exist_ok=True)
-        
-        filename = f"search_{uuid.uuid4().hex[:8]}.json"
-        filepath = os.path.join(TOOL_OUTPUT_DIR, filename)
-        
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                # 将原始搜索结果序列化保存
-                json.dump([r.model_dump() for r in deduped], f, ensure_ascii=False, indent=2)
-            file_path_str = filepath
-            if agent_cfg.verbose:
-                print(f"[落盘] 搜索结果较长({total_chars}字符)，已保存至 {file_path_str}")
-        except Exception as e:
-            if agent_cfg.verbose:
-                print(f"[落盘失败] {e}")
-
-    # 如果有落盘，追加一个特殊提示
-    if file_path_str:
-        tip = f"[系统提示: 原始搜索结果较长({total_chars}字符)已被截断。完整内容保存在 {file_path_str}。如果当前摘要信息不足以回答问题，请调用 read_tool_output 工具读取该路径。]"
-        trimmed.append(("system_tip", tip, 1.0))
-
-    return deduped, trimmed
+    return deduped, fragments

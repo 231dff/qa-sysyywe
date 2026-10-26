@@ -1,11 +1,9 @@
 """
 智能搜索助手 — ReAct Agent
-包含：动态模型配置、MCP动态工具透传、子Agent上下文隔离、长文截断、状态栏、条件化审核、Artifact图表生成
 """
 from __future__ import annotations
 
 import json
-import re
 import time
 import hashlib
 from datetime import datetime
@@ -30,21 +28,14 @@ from tools.registry import generate_fallback_answer
 from utils.context import compress_history
 from utils.helpers import count_tokens
 
-# ============================================================
-# ★ MCP 全局缓存（支持前端动态下发）
-# ============================================================
 _GLOBAL_MCP_TOOLS = []
-_MCP_TOOLS_CACHE = {}  # 缓存格式: {config_hash: [tools]}
+_MCP_TOOLS_CACHE = {}
 
-# ============================================================
-# 主 Agent (Proposer) 系统提示
-# ============================================================
 REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答用户的问题。
 
 ## 可用工具与边界
 - `spawn_search_worker`: **（最高优先级）** 委派子 Agent 去独立检索并提炼信息。适用于复杂对比、多实体查询、或者需要阅读大量长文的场景。
-- `search`: 实时联网搜索，用于简单的、单条时效性信息的查询。
-- `read_tool_output`: 读取被截断的完整搜索结果。当 `search` 的结果末尾提示了 `[系统提示: ...请调用 read_tool_output...]`，且当前摘要信息不足以回答问题时，调用此工具读取。
+- `search`: **（核心工具）** 实时联网深度搜索。它会自动抓取网页正文、切片并进行语义重排，直接返回带有 `<context_pool>` 标签的精华上下文。你无需进行额外读取。
 - `knowledge_search`: 本地知识库检索，用于内部沉淀知识。
 - `graph_search`: 知识图谱检索，用于多跳推理/精确消歧。
 - `history_search`: 检索用户过往会话。
@@ -60,7 +51,7 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 2. **简单任务直接搜索**：如果只是查一个简单的天气、股价，优先使用 MCP 工具或 `search`。
 3. **按需多次调用**：一次结果不足可换更精确的查询词再次调用。
 4. **自主停止**：信息充分后立即停止调用工具，直接给出最终答案。
-5. **强制读取**：如果你在 `search` 的结果中看到了 `[系统提示: ...请调用 read_tool_output...]`，**你必须**先调用 `read_tool_output` 读取完整内容后再作答。
+5. **直接利用上下文池作答**：你在 `search` 工具返回的结果中会看到 `<context_pool>` 标签，里面包含了多条精炼的 `<chunk>`。请直接从这些 chunk 中提取事实作答。
 6. **步数预算控制**：你的总执行步数有限。如果一次并行搜索已经覆盖了核心信息，直接总结作答，不要为了追求完美反复搜索。
 
 ## 回答规则（极其重要）
@@ -68,7 +59,8 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 2. **基于工具结果回答**: 优先使用工具返回的结果。
 3. **标注来源**: 每条关键信息末尾标注来源 [1] [2] 等。
 4. **直接作答**: 收到用户问题后，直接给出最终结论。
-5. **★ 生成式 UI (Artifact)**：如果用户要求**对比数据、展示趋势、画图表**，请**不要**使用 Markdown 表格。你必须输出一段被 `<artifact>` 标签包裹的 ECharts JSON 配置。
+5. **★ 内生置信度自检**：对于每一个关键事实陈述，请快速核对它是否直接来自你刚刚看到的 `<chunk>`。**如果某个陈述你无法在上下文中找到直接支持（或者是基于你的常识补充的），请在句末立刻加上 `[低置信度]` 标记。** 如果有明确支持，则不需要加任何标记。
+6. **生成式 UI (Artifact)**：如果用户要求**对比数据、展示趋势、画图表**，请**不要**使用 Markdown 表格。你必须输出一段被 `<artifact>` 标签包裹的 ECharts JSON 配置。
    格式如下：
    <artifact>
    {
@@ -90,31 +82,7 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 - **结尾**: 如有重要参考来源，用简短的「📚 参考来源」列出。
 - **格式**: 使用 Markdown，保持简洁。"""
 
-# ============================================================
-# Reviewer (审核员) 系统提示
-# ============================================================
-REVIEWER_SYSTEM_PROMPT = """你是一个严苛的事实核查员（Fact Checker）。
-你的任务是审核【草稿答案】是否完全基于【检索证据】生成。
-
-## 审核标准
-1. **事实一致性**：草稿中的每个关键事实、数字、日期，必须在证据中有明确出处。严禁模型依靠自身训练数据补充细节（幻觉）。
-2. **无操作独白**：草稿必须直接给出答案，严禁包含“根据我查到的资料”、“我将调用xx”等内心独白。
-3. **不完整警告**：如果用户问了对比类问题，但草稿只回答了一半，应提示补充。
-4. **Artifact 检查**：如果草稿中包含 `<artifact>` 图表配置，请忽略它，只核查文字部分的事实是否准确。
-
-## 输出格式 (严格 JSON)
-如果草稿完全合格，输出：
-{"status": "PASS"}
-
-如果发现错误或幻觉，输出修改建议：
-{"status": "REVISE", "reason": "指出具体哪里缺少证据或编造了事实", "action": "要求主模型如何修改"}
-"""
-
-MAX_REVIEW_EVIDENCE_CHARS = 4000
-
 class ReactAgent:
-    """ReAct 自主决策 Agent（含动态模型、动态 MCP 支持）"""
-
     def __init__(self, verbose: bool = False):
         api_cfg = get_api_config()
         agent_cfg = get_agent_config()
@@ -123,7 +91,7 @@ class ReactAgent:
             agent_cfg.verbose = True
 
         conn = resolve_llm_connection()
-        # 默认的全局模型，增加重试机制
+        # ★ 确保 stream_chunk_timeout=300 生效
         self._llm = ChatOpenAI(
             model=conn["model"],
             base_url=conn["base"],
@@ -131,9 +99,9 @@ class ReactAgent:
             temperature=agent_cfg.react_temperature,
             streaming=True,
             max_retries=3,
+            stream_chunk_timeout=300, 
         )
         
-        # 初始化基础工具 + 全局 MCP 工具
         all_tools = self._get_base_tools() + _GLOBAL_MCP_TOOLS
 
         self._graph = create_react_agent(
@@ -147,7 +115,6 @@ class ReactAgent:
             self._recursion_limit = 40
 
     def _get_base_tools(self):
-        """获取所有本地硬编码的工具"""
         return [
             spawn_search_worker,
             search,
@@ -160,7 +127,6 @@ class ReactAgent:
         ]
 
     async def _load_dynamic_mcp(self, mcp_config: dict):
-        """动态拉取前端下发的 MCP 工具，并加入缓存"""
         if not mcp_config:
             return _GLOBAL_MCP_TOOLS
             
@@ -187,13 +153,10 @@ class ReactAgent:
         api_key: Optional[str] = None,
         mcp_tools: Optional[list] = None
     ):
-        """动态获取 Graph"""
-        # 合并工具
         active_mcp = mcp_tools if mcp_tools is not None else _GLOBAL_MCP_TOOLS
         all_tools = self._get_base_tools() + active_mcp
 
         if not (model_override or llm_provider or api_base or api_key):
-            # 如果没有模型覆盖，但工具变了，需要重新创建 Graph
             if mcp_tools and len(active_mcp) > len(_GLOBAL_MCP_TOOLS):
                 dynamic_graph = create_react_agent(self._llm, tools=all_tools, prompt=REACT_SYSTEM_PROMPT)
                 return dynamic_graph, self._llm
@@ -206,6 +169,7 @@ class ReactAgent:
         final_base = api_base or preset.get("api_base", "https://api.openai.com/v1")
         final_key = api_key or api_cfg.llm_api_key.get_secret_value()
 
+        # ★ 同样加上超时参数
         dynamic_llm = ChatOpenAI(
             model=final_model,
             base_url=final_base,
@@ -213,6 +177,7 @@ class ReactAgent:
             temperature=get_agent_config().react_temperature,
             streaming=True,
             max_retries=3,
+            stream_chunk_timeout=300,
         )
         
         dynamic_graph = create_react_agent(
@@ -269,51 +234,6 @@ class ReactAgent:
                     sources.append(Source(url=url, title=item.get("title", ""), snippet=item.get("snippet", "")))
         return final_text, sources
 
-    @staticmethod
-    def _extract_evidence(messages: list[BaseMessage]) -> str:
-        evidence_texts = []
-        for msg in messages:
-            if isinstance(msg, ToolMessage) and isinstance(msg.content, str):
-                clean_content = re.sub(r'<agent_status>.*?</agent_status>', '', msg.content, flags=re.DOTALL)
-                evidence_texts.append(clean_content.strip())
-        
-        full_evidence = "\n---\n".join(evidence_texts)
-        if len(full_evidence) > MAX_REVIEW_EVIDENCE_CHARS:
-            return full_evidence[:MAX_REVIEW_EVIDENCE_CHARS] + "...[证据截断]"
-        return full_evidence
-
-    async def _review_and_correct(self, llm, user_query: str, draft_answer: str, evidence: str) -> str:
-        if not evidence:
-            return draft_answer
-
-        prompt = f"""## 用户问题\n{user_query}\n\n## 检索证据\n{evidence}\n\n## 草稿答案\n{draft_answer}\n\n请审核草稿。"""
-
-        try:
-            review_llm = llm.bind(temperature=0.0)
-            response = await review_llm.ainvoke([
-                SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
-                HumanMessage(content=prompt)
-            ])
-            
-            content = response.content
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if not json_match: return draft_answer
-            
-            result = json.loads(json_match.group(0))
-            if result.get("status") == "REVISE":
-                if get_agent_config().verbose:
-                    print(f"[Reviewer 拦截] {result.get('reason')}")
-                
-                fix_prompt = f"""你之前的回答被驳回了。\n原因：{result.get('reason')}\n修改要求：{result.get('action')}\n\n请**仅基于以下证据**，重新生成回答：\n{evidence}\n直接输出正文。"""
-                fixed_response = await llm.ainvoke([
-                    SystemMessage(content=REACT_SYSTEM_PROMPT),
-                    HumanMessage(content=fix_prompt)
-                ])
-                return fixed_response.content
-            return draft_answer
-        except Exception as e:
-            return draft_answer
-
     async def run(
         self,
         user_query: str,
@@ -353,10 +273,6 @@ class ReactAgent:
 
             if not final_text:
                 return await self._fallback(user_query, history, start, confidence=0.5)
-
-            evidence = self._extract_evidence(messages)
-            if evidence.strip():
-                final_text = await self._review_and_correct(active_llm, user_query, final_text, evidence)
 
             elapsed_ms = (time.perf_counter() - start) * 1000
             return GeneratedAnswer(
@@ -409,30 +325,9 @@ class ReactAgent:
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
         
-        final_text = ""
-        messages = []
-        
         async for event in active_graph.astream_events(
             {"messages": input_messages},
             version="v2",
             config={"recursion_limit": self._recursion_limit},
         ):
-            if event.get("event") == "on_chat_model_stream":
-                chunk = event.get("data", {}).get("chunk")
-                if chunk and getattr(chunk, "content", ""):
-                    final_text += chunk.content
-            
             yield event
-            
-            if event.get("event") == "on_chain_end" and event.get("name") == "LangGraph":
-                output = event.get("data", {}).get("output")
-                if isinstance(output, dict): messages = output.get("messages", [])
-                elif isinstance(output, list): messages = output
-
-        if final_text and messages:
-            evidence = self._extract_evidence(messages)
-            if evidence.strip():
-                yield {"event": "progress", "data": {"node": "reviewer", "message": "正在进行事实与幻觉核查..."}}
-                revised_text = await self._review_and_correct(active_llm, user_query, final_text, evidence)
-                if revised_text != final_text:
-                    yield {"event": "revise", "data": {"text": revised_text}}

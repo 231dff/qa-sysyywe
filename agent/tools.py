@@ -26,7 +26,7 @@ _tool_call_counts: ContextVar[dict] = ContextVar("tool_call_counts", default={})
 # ★ 用于透传给子 Agent 的 LLM 配置
 _llm_api_key: ContextVar[str] = ContextVar("llm_api_key", default="")
 _llm_api_base: ContextVar[str] = ContextVar("llm_api_base", default="")
-_llm_model: ContextVar[str] = ContextVar("llm_model", default="")  # 新增：模型名称
+_llm_model: ContextVar[str] = ContextVar("llm_model", default="")
 
 def set_current_user_id(user_id: str) -> None:
     _current_user_id.set(user_id or "")
@@ -62,6 +62,8 @@ def _increment_and_get_status(tool_name: str) -> str:
 # ============================================================
 WORKER_PROMPT = """你是一个专业的资料检索子 Agent。
 你的任务是根据指令去联网搜索信息，并提炼出最核心的事实与数据。
+系统已经为你自动完成了网页抓取和语义重排，你收到的结果是高度浓缩的上下文段落。
+
 请直接输出结构化的要点（如 Markdown 列表），不要输出任何废话，不要包含你正在使用工具的描述。"""
 
 @tool
@@ -80,7 +82,6 @@ async def spawn_search_worker(query: str) -> str:
         current_base = api_cfg.llm_api_base
         current_model = "qwen-turbo"
     
-    # ★ 核心修复：增加 max_retries=3，防止 429 限流直接崩溃
     worker_llm = ChatOpenAI(
         model=current_model, 
         base_url=current_base,
@@ -91,10 +92,16 @@ async def spawn_search_worker(query: str) -> str:
     
     @tool
     async def local_search(q: str) -> str:
-        """底层联网搜索"""
+        """底层联网深度搜索"""
         _, fragments = await search_and_filter_pipeline(query=q, max_results=5)
-        real_fragments = [f for f in fragments if f[0] != "system_tip"]
-        return "\n".join([f"[{f[0]}] {f[1]}" for f in real_fragments])
+        if not fragments:
+            return "（未搜索到有效结果）"
+            
+        # 拼接清洗后的文本片段
+        parts = []
+        for i, (url, content, score) in enumerate(fragments, 1):
+            parts.append(f"[来源 {i} ({url})] \n{content}")
+        return "\n\n".join(parts)
 
     sub_agent = create_react_agent(
         worker_llm,
@@ -114,11 +121,11 @@ async def spawn_search_worker(query: str) -> str:
 
 
 # ============================================================
-# 下面是你原有的工具代码，保持不变
+# 主 Agent 工具
 # ============================================================
 @tool
 async def read_tool_output(file_path: str) -> str:
-    """读取因为过长而被截断落盘的完整内容。"""
+    """读取因为过长而被截断落盘的完整内容。（注：升级后搜索工具已极少触发此机制）"""
     if not file_path.startswith("/tmp/tool_outputs/"):
         return "Error: 安全限制，只能读取工具输出目录下的文件。"
     if not os.path.exists(file_path):
@@ -138,10 +145,9 @@ async def search(
     search_depth: str = "advanced",
     max_results: int = 5,
 ) -> str:
-    """实时联网搜索工具。"""
+    """实时联网深度搜索工具。内部已完成网页精读与重排，直接返回高密度上下文池。"""
     _, fragments = await search_and_filter_pipeline(
         query=query,
-        use_llm_scoring=False,
         search_depth=search_depth,
         max_results=max_results,
     )
@@ -149,13 +155,15 @@ async def search(
     if not fragments:
         result = json.dumps({"summary": "（未搜索到有效结果）", "sources": []}, ensure_ascii=False)
     else:
-        real_fragments = [f for f in fragments if f[0] != "system_tip"]
-        tips = [f[1] for f in fragments if f[0] == "system_tip"]
-        trimmed = real_fragments[:max_results]
-        summary = format_search_context(trimmed)
-        if tips:
-            summary += "\n\n" + "\n".join(tips)
-        sources = [{"url": url, "title": "", "snippet": content[:200]} for url, content, _score in trimmed]
+        # ★ 组装为高密度上下文池，直接喂给大模型
+        summary_parts = []
+        sources = []
+        
+        for i, (url, content, score) in enumerate(fragments, 1):
+            summary_parts.append(f"<chunk id='{i}' source='{url}'>\n{content}\n</chunk>")
+            sources.append({"url": url, "title": "", "snippet": content[:200]})
+            
+        summary = "<context_pool>\n" + "\n\n".join(summary_parts) + "\n</context_pool>"
         result = json.dumps({"summary": summary, "sources": sources}, ensure_ascii=False)
 
     status = _increment_and_get_status("search")

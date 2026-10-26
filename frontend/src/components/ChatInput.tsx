@@ -4,10 +4,11 @@ import { useState, useRef } from "react";
 
 interface ChatInputProps {
   onSubmit: (text: string) => void;
+  onStop: () => void; // ★ 新增停止回调
   disabled: boolean;
 }
 
-export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
+export default function ChatInput({ onSubmit, onStop, disabled }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -16,9 +17,7 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
     if (!text || disabled) return;
     onSubmit(text);
     setValue("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -47,16 +46,29 @@ export default function ChatInput({ onSubmit, disabled }: ChatInputProps) {
         rows={1}
         className="w-full bg-transparent px-2 py-2 text-[15px] text-gray-800 resize-none focus:outline-none max-h-[200px] min-h-[44px]"
       />
-      <button
-        onClick={handleSubmit}
-        disabled={disabled || !value.trim()}
-        className="mb-1 mr-1 flex items-center justify-center w-8 h-8 rounded-full bg-black hover:bg-gray-800 text-white transition disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
-      </button>
+      {/* ★ 根据状态切换 发送/停止 按钮 */}
+      {disabled ? (
+        <button
+          onClick={onStop}
+          className="mb-1 mr-1 flex items-center justify-center w-8 h-8 rounded-full bg-gray-800 hover:bg-black text-white transition shrink-0"
+          title="停止生成"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="4" y="4" width="16" height="16" rx="2" />
+          </svg>
+        </button>
+      ) : (
+        <button
+          onClick={handleSubmit}
+          disabled={!value.trim()}
+          className="mb-1 mr-1 flex items-center justify-center w-8 h-8 rounded-full bg-black hover:bg-gray-800 text-white transition disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      )}
     </div>
   );
 }

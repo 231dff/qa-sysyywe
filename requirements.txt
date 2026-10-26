@@ -60,4 +60,7 @@ langfuse>=2.0.0
 
 mcp>=1.0.0
 langchain-mcp-adapters>=0.1.0
-sqlite-memory-mcp
+sqlite-memory-mcp @ git+https://github.com/RMANOV/sqlite-memory-mcp.git
+
+trafilatura>=1.8.0
+scikit-learn>=1.3.0
