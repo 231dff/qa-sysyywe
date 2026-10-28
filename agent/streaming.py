@@ -83,7 +83,8 @@ async def run_stream_sse(
         else:
             memory_context = get_memory_manager().recall(user_id, user_query).render() if user_id else ""
 
-        async for event in agent._react.astream_events(
+        # ★ 核心改造：手动控制迭代器，实现 15s 超时心跳
+        stream = agent._react.astream_events(
             user_query,
             history,
             memory_context=memory_context,
@@ -93,7 +94,19 @@ async def run_stream_sse(
             api_base=api_base,
             api_key=api_key,
             mcp_config=mcp_config,
-        ):
+        )
+        aiter = stream.__aiter__()
+
+        while True:
+            try:
+                # 等待下一个事件，如果 15 秒没动静，就发心跳保活
+                event = await asyncio.wait_for(aiter.__anext__(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield _sse_event("heartbeat", {"status": "thinking"})
+                continue
+            except StopAsyncIteration:
+                break
+
             kind = event.get("event", "")
             data = event.get("data", {})
 
@@ -101,19 +114,16 @@ async def run_stream_sse(
                 chunk = data.get("chunk")
                 if getattr(chunk, "tool_call_chunks", None): continue
                 
-                # ★ 核心修复：同时提取 Qwen 的 content 和 reasoning_content
                 text = getattr(chunk, "content", "") or ""
                 
-                # Qwen 的思考过程可能藏在 additional_kwargs 或 response_metadata 里
+                # ★ 提取并透传 Reasoning 思考过程
                 reasoning = ""
                 if hasattr(chunk, "additional_kwargs"):
-                    reasoning = chunk.additional_kwargs.get("reasoning_content", "")
+                    reasoning = chunk.additional_kwargs.get("reasoning_content", "") or chunk.additional_kwargs.get("reasoning", "")
                 
-                if reasoning and not text:
-                    # 这是一个有效的思考心跳，可以偷偷发给前端一个空白 token 防止 120s 超时
-                    # 或者发一个 progress 状态提示用户。
-                    # 这里我们发一个空文本 token 维持 SSE 连接。
-                    yield _sse_event("token", {"text": ""}) 
+                if reasoning:
+                    # 将思考过程发给前端，作为状态栏展示，同时也是天然的心跳
+                    yield _sse_event("reasoning", {"text": reasoning})
                 
                 if text:
                     answer_text += text
@@ -183,7 +193,14 @@ async def run_stream_sse(
     except Exception as exc:
         import traceback
         traceback.print_exc()
-        yield _sse_event("error", {"message": str(exc), "code": type(exc).__name__})
+        
+        # ★ 核心兜底：如果是底层 LangChain 看门狗超时，不向前端抛红字，而是优雅结束
+        error_msg = str(exc)
+        if "No streaming chunk received" in error_msg:
+            yield _sse_event("progress", {"node": "generate", "message": "模型深度思考时间过长，已为您自动中断并保留当前结果。"})
+            yield _sse_event("done", {"confidence": 0.8, "latency_ms": (time.perf_counter() - start) * 1000, "tokens_used": count_tokens(answer_text), "is_fallback": True})
+        else:
+            yield _sse_event("error", {"message": error_msg, "code": type(exc).__name__})
     finally:
         if not saved_to_history:
             content = answer_text + "\n\n*(异常中断)*" if answer_text else "*(生成异常中断)*"

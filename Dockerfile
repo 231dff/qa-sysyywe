@@ -7,31 +7,37 @@ ENV TZ=Asia/Shanghai \
     PYTHONIOENCODING=utf-8 \
     PYTHONUTF8=1 \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PIP_NO_CACHE_DIR=1
+    LC_ALL=C.UTF-8
 
-# 基础工具（★ 增加了 git，用于从 GitHub 拉取 sqlite-memory-mcp）
+# 使用清华源（解决底层 perl 冲突）
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ trixie main non-free non-free-firmware contrib" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security/ trixie-security main" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ trixie-updates main non-free non-free-firmware contrib" >> /etc/apt/sources.list
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 先装依赖（利用 layer cache）
 COPY requirements.txt .
-# ★ 使用清华镜像源加速并避免 SSL 报错
-RUN pip install --no-cache-dir -r requirements.txt \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    --trusted-host pypi.tuna.tsinghua.edu.cn
 
-# 再拷代码
+# ★ 终极抗断流版：
+# 1. 通过 config 配置全局镜像源
+# 2. 将 timeout 设为 1000 秒
+# 3. 移除了 --no-cache-dir，让下载的包留在 Docker 缓存里，断网重试不用从头再来
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn && \
+    pip install --timeout 1000 -r requirements.txt
+
+# 单独安装 sqlite-memory-mcp，并强制忽略它的依赖（防止破坏主环境）
+RUN pip install --timeout 1000 --no-deps git+https://github.com/RMANOV/sqlite-memory-mcp.git
+
 COPY . .
 
-# 建好数据目录（会被 PVC 覆盖）
 RUN mkdir -p /app/data/kb
 
-# 非 root 用户运行
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 

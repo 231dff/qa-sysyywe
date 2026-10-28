@@ -9,7 +9,6 @@ export interface ChatRequest {
   search_depth?: string | null;
   top_k?: number | null;
   
-  // ★ 新增：支持自定义大模型配置与 MCP 配置
   llm_provider?: string | null;
   api_base?: string | null;
   api_key?: string | null;
@@ -60,7 +59,9 @@ export type SSEEvent =
   | { type: "sources"; data: SourcesEvent }
   | { type: "done"; data: DoneEvent }
   | { type: "error"; data: ErrorEvent }
-  | { type: "revise"; data: { text: string } };
+  | { type: "revise"; data: { text: string } }
+  | { type: "reasoning"; data: { text: string } }
+  | { type: "heartbeat"; data: any };
 
 /** 聊天消息 */
 export interface ChatMessage {

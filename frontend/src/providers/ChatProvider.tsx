@@ -6,8 +6,8 @@ import { generateSessionId, getOrCreateUserId, getSession, deleteSession as apiD
 
 const SSE_BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "";
 const LOCAL_SESSIONS_KEY = "qa_local_sessions_v1";
+const THEME_KEY = "qa_theme"; // ★ 新增：主题存储 Key
 
-// 定义单个会话的 SSE 状态
 export interface SessionSSEState {
   status: "idle" | "connecting" | "streaming" | "done" | "error" | "aborted";
   tokens: string;
@@ -15,10 +15,11 @@ export interface SessionSSEState {
   meta: DoneEvent | null;
   error: string | null;
   progressMessage: string | null;
+  reasoningMessage: string | null; 
 }
 
 const DEFAULT_SSE_STATE: SessionSSEState = {
-  status: "idle", tokens: "", sources: [], meta: null, error: null, progressMessage: null,
+  status: "idle", tokens: "", sources: [], meta: null, error: null, progressMessage: null, reasoningMessage: null,
 };
 
 const getLocalSessions = (): SessionSummary[] => {
@@ -35,15 +36,17 @@ const saveLocalSessions = (data: SessionSummary[]) => {
 };
 
 interface ChatContextType {
-  messages: ChatMessage[]; // 当前激活会话的消息
+  messages: ChatMessage[]; 
   sessionId: string;
   userId: string;
   settings: UserSettings;
   stats: { totalQueries: number; totalTokens: number };
   sessions: SessionSummary[];
   sessionsLoading: boolean;
-  sse: SessionSSEState & { streamSessionId: string }; // 当前激活会话的 SSE 状态
-  generatingSessionIds: string[]; // ★ 新增：记录所有正在后台运行的会话 ID
+  sse: SessionSSEState & { streamSessionId: string };
+  generatingSessionIds: string[];
+  theme: "light" | "dark"; // ★ 新增主题
+  toggleTheme: () => void; // ★ 新增切换主题方法
   sendMessage: (content: string) => Promise<void>;
   stopGeneration: () => void;
   clearHistory: () => void;
@@ -72,7 +75,6 @@ export default function ChatProvider({
   const [sessionId, setSessionId] = useState<string>(generateSessionId);
   const [userId, setUserId] = useState<string>("");
   
-  // ★ 核心重构：消息字典和多会话 SSE 字典
   const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>({});
   const [sseStateMap, setSseStateMap] = useState<Record<string, SessionSSEState>>({});
   
@@ -81,22 +83,47 @@ export default function ChatProvider({
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
 
-  // 并发控制器字典，记录每个会话的 AbortController
+  // ★ 新增：主题状态
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
   const abortControllers = useRef<Record<string, AbortController>>({});
   const msgCounter = useRef(0);
 
-  // 当前会话的数据（提供给 UI 消费）
   const currentMessages = messagesMap[sessionId] || [];
   const currentSseState = sseStateMap[sessionId] || DEFAULT_SSE_STATE;
 
-  // ★ 计算所有正在后台生成的会话 ID
   const generatingSessionIds = Object.keys(sseStateMap).filter(
     (sid) => sseStateMap[sid].status === "connecting" || sseStateMap[sid].status === "streaming"
   );
 
+  // ★ 初始化：挂载时读取 Theme
   useEffect(() => {
     setUserId(getOrCreateUserId());
     setSessions(getLocalSessions());
+
+    const savedTheme = localStorage.getItem(THEME_KEY) as "light" | "dark" | null;
+    const initialTheme = savedTheme || "light";
+    setTheme(initialTheme);
+    
+    if (initialTheme === "dark") {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+  }, []);
+
+  // ★ 新增：切换 Theme 的逻辑
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next = prev === "light" ? "dark" : "light";
+      localStorage.setItem(THEME_KEY, next);
+      if (next === "dark") {
+        document.documentElement.classList.add("dark");
+      } else {
+        document.documentElement.classList.remove("dark");
+      }
+      return next;
+    });
   }, []);
 
   const refreshSessions = useCallback(async () => {
@@ -107,9 +134,8 @@ export default function ChatProvider({
     async (sid: string) => {
       if (!userId || sid === sessionId) return;
       
-      setSessionId(sid); // 瞬间切换 UI
+      setSessionId(sid);
       
-      // 如果本地 Map 里没有该会话数据，去后端拉取
       if (!messagesMap[sid] || messagesMap[sid].length === 0) {
         setSessionsLoading(true);
         try {
@@ -144,7 +170,6 @@ export default function ChatProvider({
         if (sid === sessionId) {
           setSessionId(generateSessionId());
         }
-        // 清理内存
         setMessagesMap(prev => {
           const next = { ...prev };
           delete next[sid];
@@ -177,12 +202,10 @@ export default function ChatProvider({
       if (!content.trim() || !userId) return;
       const sid = sessionId;
 
-      // 如果当前会话还在跑，先强行停掉（单会话内不允许并发）
       if (abortControllers.current[sid]) {
         abortControllers.current[sid].abort();
       }
 
-      // 更新本地历史列表
       let currentSessions = getLocalSessions();
       const exists = currentSessions.find((s) => s.session_id === sid);
       if (!exists) {
@@ -196,11 +219,9 @@ export default function ChatProvider({
       saveLocalSessions(currentSessions);
       setSessions(currentSessions);
 
-      // 追加用户消息
       const userMsg: ChatMessage = { id: `u_${msgCounter.current++}`, role: "user", content };
       setMessagesMap(prev => ({ ...prev, [sid]: [...(prev[sid] || []), userMsg] }));
 
-      // 初始化 SSE 状态
       setSseStateMap(prev => ({
         ...prev,
         [sid]: { ...DEFAULT_SSE_STATE, status: "connecting", progressMessage: "正在思考如何回答..." }
@@ -225,7 +246,6 @@ export default function ChatProvider({
         search_depth: settings.searchDepth, top_k: settings.topK,
       };
 
-      // 启动流
       const controller = new AbortController();
       abortControllers.current[sid] = controller;
 
@@ -264,7 +284,6 @@ export default function ChatProvider({
               if (currentEvent && dataStr) {
                 try {
                   const data = JSON.parse(dataStr);
-                  // ★ 核心：通过闭包捕获的 sid，把状态更新到对应会话！
                   handleSSEEvent(sid, currentEvent, data, setSseStateMap);
                 } catch {}
               }
@@ -273,7 +292,6 @@ export default function ChatProvider({
           }
         }
 
-        // 流正常结束
         setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "done" } }));
       } catch (err: any) {
         if (err.name === "AbortError") {
@@ -294,7 +312,6 @@ export default function ChatProvider({
     }
   }, [sessionId]);
 
-  // 处理流结束时，把 tokens 固化到 messages 里
   const doneRef = useRef<Record<string, boolean>>({});
   useEffect(() => {
     Object.keys(sseStateMap).forEach(sid => {
@@ -302,7 +319,6 @@ export default function ChatProvider({
       
       if (sse.status === "done" && !doneRef.current[sid]) {
         doneRef.current[sid] = true;
-        // 固化消息
         setMessagesMap(prev => {
           const msgs = prev[sid] || [];
           const assistantMsg: ChatMessage = {
@@ -335,9 +351,23 @@ export default function ChatProvider({
         doneRef.current[sid] = true;
         if (sid === sessionId) {
           const isInspectionError = sse.error?.includes("内容安全审核") || sse.error?.includes("inappropriate content");
+          const isQuotaError = sse.error?.includes("Free quota exhausted") || sse.error?.includes("insufficient_quota");
+          
+          let errText = `❌ 错误: ${sse.error}`;
+          if (isInspectionError) {
+            errText = "🚫 **会话历史触发了内容审核**。\n\n请点击左侧的 **「+ 新会话」**。";
+          } else if (isQuotaError) {
+            errText = "💳 **API 免费额度已耗尽**。\n\n请前往控制台充值，或在设置中切换其他大模型。";
+          }
+
+          const finalContent = sse.tokens 
+            ? sse.tokens + `\n\n*(⚠️ 生成中断: ${errText})*` 
+            : errText;
+
           const errorMsg: ChatMessage = { 
-            id: `e_${msgCounter.current++}`, role: "assistant", 
-            content: isInspectionError ? "🚫 **会话历史触发了内容审核**。\n\n请点击左侧的 **「+ 新会话」**。" : `❌ 错误: ${sse.error}` 
+            id: `e_${msgCounter.current++}`, 
+            role: "assistant", 
+            content: finalContent 
           };
           setMessagesMap(prev => ({ ...prev, [sid]: [...(prev[sid] || []), errorMsg] }));
         }
@@ -358,9 +388,10 @@ export default function ChatProvider({
         stats, 
         sessions, 
         sessionsLoading, 
-        // 将当前会话的 SSE 状态 + streamSessionId 提供给组件
         sse: { ...currentSseState, streamSessionId: sessionId },
-        generatingSessionIds, // ★ 将后台并发会话列表传递给外部
+        generatingSessionIds, 
+        theme, // ★
+        toggleTheme, // ★
         sendMessage, stopGeneration, clearHistory, newSession, updateSettings, refreshSessions, switchSession, removeSession,
       }}
     >
@@ -369,9 +400,6 @@ export default function ChatProvider({
   );
 }
 
-// ==========================================
-// 独立的事件处理函数，把数据更新进对应的 Map
-// ==========================================
 function handleSSEEvent(
   sid: string, 
   eventType: string, 
@@ -382,9 +410,13 @@ function handleSSEEvent(
     const state = prev[sid] || DEFAULT_SSE_STATE;
     switch (eventType) {
       case "progress":
-        return { ...prev, [sid]: { ...state, progressMessage: data.message } };
+        return { ...prev, [sid]: { ...state, progressMessage: data.message, reasoningMessage: null } };
       case "token":
-        return { ...prev, [sid]: { ...state, tokens: state.tokens + data.text } };
+        return { ...prev, [sid]: { ...state, tokens: state.tokens + data.text, reasoningMessage: null } };
+      case "reasoning":
+        return { ...prev, [sid]: { ...state, reasoningMessage: data.text.slice(-40) } };
+      case "heartbeat":
+        return prev; // 心跳包，忽略即可
       case "sources":
         return { ...prev, [sid]: { ...state, sources: data.sources } };
       case "done":

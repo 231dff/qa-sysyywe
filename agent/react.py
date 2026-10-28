@@ -3,6 +3,10 @@
 """
 from __future__ import annotations
 
+import os
+# ★ 双保险：强制在模块加载时禁用 LangChain 底层流式看门狗
+os.environ["LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S"] = "0"
+
 import json
 import time
 import hashlib
@@ -60,7 +64,13 @@ REACT_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 3. **标注来源**: 每条关键信息末尾标注来源 [1] [2] 等。
 4. **直接作答**: 收到用户问题后，直接给出最终结论。
 5. **★ 内生置信度自检**：对于每一个关键事实陈述，请快速核对它是否直接来自你刚刚看到的 `<chunk>`。**如果某个陈述你无法在上下文中找到直接支持（或者是基于你的常识补充的），请在句末立刻加上 `[低置信度]` 标记。** 如果有明确支持，则不需要加任何标记。
-6. **生成式 UI (Artifact)**：如果用户要求**对比数据、展示趋势、画图表**，请**不要**使用 Markdown 表格。你必须输出一段被 `<artifact>` 标签包裹的 ECharts JSON 配置。
+6. **★ 丰富的 Emoji 表达（核心风格）**：
+   - 回答的第一句话开头必须加上 `🚀`。
+   - 在列举关键约束、安全提示、风险警告时，适当使用 `🛡️`、`⚠️`。
+   - 在总结、趋势预测或重大数据前，使用 `📈`、`💡`。
+   - 在代码块或系统级操作前，使用 `💻`。
+   - **注意**：Emoji 必须与文字有空格隔开，自然融入，不要满屏都是，保持专业感。
+7. **生成式 UI (Artifact)**：如果用户要求**对比数据、展示趋势、画图表**，请**不要**使用 Markdown 表格。你必须输出一段被 `<artifact>` 标签包裹的 ECharts JSON 配置。
    格式如下：
    <artifact>
    {
@@ -91,7 +101,7 @@ class ReactAgent:
             agent_cfg.verbose = True
 
         conn = resolve_llm_connection()
-        # ★ 确保 stream_chunk_timeout=300 生效
+        
         self._llm = ChatOpenAI(
             model=conn["model"],
             base_url=conn["base"],
@@ -99,7 +109,7 @@ class ReactAgent:
             temperature=agent_cfg.react_temperature,
             streaming=True,
             max_retries=3,
-            stream_chunk_timeout=300, 
+            stream_chunk_timeout=None, # ★ 彻底关闭 120s 看门狗
         )
         
         all_tools = self._get_base_tools() + _GLOBAL_MCP_TOOLS
@@ -169,7 +179,6 @@ class ReactAgent:
         final_base = api_base or preset.get("api_base", "https://api.openai.com/v1")
         final_key = api_key or api_cfg.llm_api_key.get_secret_value()
 
-        # ★ 同样加上超时参数
         dynamic_llm = ChatOpenAI(
             model=final_model,
             base_url=final_base,
@@ -177,7 +186,7 @@ class ReactAgent:
             temperature=get_agent_config().react_temperature,
             streaming=True,
             max_retries=3,
-            stream_chunk_timeout=300,
+            stream_chunk_timeout=None, # ★ 彻底关闭
         )
         
         dynamic_graph = create_react_agent(
