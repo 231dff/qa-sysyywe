@@ -59,8 +59,13 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 
-# ★ MCP 客户端引入
-from langchain_mcp_adapters.client import MultiServerMCPClient
+# ★ 核心修复：加入 try-except 优雅降级，防止 MCP 依赖问题导致整个后端崩溃
+try:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+except ImportError as e:
+    print(f"[警告] MCP 适配器加载失败，将跳过 MCP 功能。报错详情: {e}")
+    MultiServerMCPClient = None
+
 import agent.react as react_module
 
 from agent.graph import SearchAgent
@@ -153,21 +158,24 @@ async def startup():
     )
     set_shared_client(client)
 
-    # ★ MCP 默认内置工具加载
-    try:
-        print("[MCP] 正在连接本地默认 MCP Server...")
-        mcp_client = MultiServerMCPClient({
-            "weather_server": {
-                "command": sys.executable,
-                "args": ["/app/mcp_server.py"],
-                "transport": "stdio",
-            }
-        })
-        tools = await mcp_client.get_tools()
-        react_module._GLOBAL_MCP_TOOLS = tools
-        print(f"[MCP] 成功加载 {len(tools)} 个默认工具: {[t.name for t in tools]}")
-    except Exception as e:
-        print(f"[MCP] 加载失败: {e}")
+    # ★ 核心修复：增加判空逻辑，优雅降级
+    if MultiServerMCPClient is not None:
+        try:
+            print("[MCP] 正在连接本地默认 MCP Server...")
+            mcp_client = MultiServerMCPClient({
+                "weather_server": {
+                    "command": sys.executable,
+                    "args": ["/app/mcp_server.py"],
+                    "transport": "stdio",
+                }
+            })
+            tools = await mcp_client.get_tools()
+            react_module._GLOBAL_MCP_TOOLS = tools
+            print(f"[MCP] 成功加载 {len(tools)} 个默认工具: {[t.name for t in tools]}")
+        except Exception as e:
+            print(f"[MCP] 加载失败: {e}")
+    else:
+        print("[MCP] 因依赖缺失，跳过 MCP 初始化。系统继续以无 MCP 模式启动。")
 
 
 @app.on_event("shutdown")
@@ -198,7 +206,16 @@ class ChatRequest(BaseModel):
     llm_provider: Optional[str] = Field(None, description="提供商标识 (如 openai/qwen)")
     api_base: Optional[str] = Field(None, description="LLM API Base URL")
     api_key: Optional[str] = Field(None, description="LLM API Key")
-    mcp_config: Optional[dict] = Field(None, description="自定义 MCP 配置") # ★ 新增
+    mcp_config: Optional[dict] = Field(None, description="自定义 MCP 配置")
+
+    # ★ 新增：控制开关
+    enable_deep_think: Optional[bool] = Field(True, description="是否开启深度思考")
+    enable_search: Optional[bool] = Field(True, description="是否开启联网搜索")
+
+    # ★ 新增：备用模型降级配置
+    fallback_model: Optional[str] = Field(None, description="备用降级模型")
+    fallback_api_base: Optional[str] = Field(None, description="备用模型 API Base")
+    fallback_api_key: Optional[str] = Field(None, description="备用模型 API Key")
 
     search_depth: Optional[str] = Field(None, description="搜索深度 (basic | advanced)")
     top_k: Optional[int] = Field(None, ge=2, le=10, description="保留 Top-K 片段")
@@ -283,9 +300,14 @@ async def chat_stream(req: ChatRequest, request: Request):
             llm_provider=req.llm_provider,
             api_base=req.api_base,
             api_key=req.api_key,
-            mcp_config=req.mcp_config, # ★ 透传
-            search_depth_override=req.search_depth,
-            top_k_override=req.top_k,
+            mcp_config=req.mcp_config,
+            # ★ 核心修复：移除了 search_depth_override 和 top_k_override
+            # 向下透传开关和备用配置
+            enable_deep_think=req.enable_deep_think,
+            enable_search=req.enable_search,
+            fallback_model=req.fallback_model,
+            fallback_api_base=req.fallback_api_base,
+            fallback_api_key=req.fallback_api_key,
         ):
             if await request.is_disconnected():
                 disconnected = True

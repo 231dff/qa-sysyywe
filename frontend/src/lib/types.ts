@@ -13,6 +13,15 @@ export interface ChatRequest {
   api_base?: string | null;
   api_key?: string | null;
   mcp_config?: Record<string, any> | null;
+
+  // ★ 新增：控制开关
+  enable_deep_think?: boolean;
+  enable_search?: boolean;
+
+  // ★ 备用降级配置
+  fallback_model?: string | null;
+  fallback_api_base?: string | null;
+  fallback_api_key?: string | null;
 }
 
 /** SSE 进度事件 */
@@ -75,6 +84,10 @@ export interface ChatMessage {
     tokens_used: number;
     is_fallback: boolean;
   };
+  reasoningText?: string;
+  reasoningDuration?: number;
+  isThinking?: boolean;
+  progressMessage?: string | null;
 }
 
 /** 会话信息 */

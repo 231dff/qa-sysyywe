@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-# ★ 双保险：强制在此模块加载时禁用 LangChain 底层流式看门狗
+# ★ 双保险：强制在模块加载时禁用 LangChain 底层流式看门狗
 os.environ["LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S"] = "0"
 
 import json
@@ -85,14 +85,13 @@ async def spawn_search_worker(query: str) -> str:
         current_base = api_cfg.llm_api_base
         current_model = "qwen-turbo"
     
-    # ★ 核心修复：子 Agent 的 worker_llm 也必须关闭看门狗
+    # ★ 核心修复：同样移除不被支持的参数
     worker_llm = ChatOpenAI(
         model=current_model, 
         base_url=current_base,
         api_key=current_key,
         temperature=0.0,
         max_retries=3,
-        stream_chunk_timeout=None,  # 彻底禁用超时
     )
     
     @tool

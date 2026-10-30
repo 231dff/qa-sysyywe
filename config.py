@@ -11,9 +11,7 @@ from typing import Optional
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent
-
 
 # ============================================================
 # 多平台 Provider 预设
@@ -39,17 +37,16 @@ PROVIDER_PRESETS: dict[str, dict] = {
     },
 }
 
-
 def get_provider_preset(provider: str) -> dict:
     return PROVIDER_PRESETS.get(provider.lower(), {})
-
 
 # ============================================================
 # 外部 API 配置
 # ============================================================
 class APIConfig(BaseSettings):
+    # ★ 修复：将默认值从 OpenAI 改为空，强制要求环境变量或前端提供
     llm_provider: str = Field(
-        default="",
+        default="qwen",
         description="LLM 提供商预设: openai | qwen | deepseek（空则用 llm_api_base 直连）",
     )
     llm_api_key: SecretStr = Field(
@@ -57,11 +54,11 @@ class APIConfig(BaseSettings):
         description="LLM API Key",
     )
     llm_api_base: str = Field(
-        default="https://api.openai.com/v1",
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         description="LLM API Base URL",
     )
     llm_model: str = Field(
-        default="gpt-4o-mini",
+        default="qwen-turbo",
         description="默认 LLM 模型名称",
     )
     llm_temperature: float = Field(
@@ -87,7 +84,7 @@ class APIConfig(BaseSettings):
 
     @property
     def resolved_provider(self) -> str:
-        return self.llm_provider.lower() if self.llm_provider else ""
+        return self.llm_provider.lower() if self.llm_provider else "qwen"
 
     @property
     def supports_response_format(self) -> bool:
@@ -102,7 +99,6 @@ class APIConfig(BaseSettings):
         if preset:
             return preset.get("supports_embedding", False)
         return False
-
 
 # ============================================================
 # TencentDB-Agent-Memory（TDAI）可选外部记忆侧车
@@ -119,54 +115,42 @@ class TdaiConfig(BaseSettings):
         extra="ignore",
     )
 
-
 # ============================================================
 # Agent 行为配置
 # ============================================================
 class AgentConfig(BaseSettings):
-    # ── 搜索 ──
     max_search_results: int = 10
     search_depth: str = "advanced"
     search_timeout: float = 15.0
     include_domains: list[str] = []
     exclude_domains: list[str] = []
 
-    # ── 上下文裁剪 ──
     top_k_fragments: int = 5
     max_context_tokens: int = 3000
     dedup_window: int = 50
 
-    # ── 会话 ──
     max_history_turns: int = 10
-    # ★ 修改：将默认 1 小时改为 7 天 (86400 * 7)
     session_ttl_seconds: int = 604800
 
-    # ── 重试 ──
     max_retries: int = 3
     base_delay: float = 1.0
     max_delay: float = 30.0
 
-    # ── 限流 ──
     max_requests_per_minute: int = 30
     max_searches_per_minute: int = 10
 
-    # ── ReAct Agent ──
     max_react_iterations: int = 6
-    react_recursion_limit: int = 40 # 之前优化时已经改成了40
+    react_recursion_limit: int = 40 
     react_temperature: float = 0.3
 
-    # ── 时间感知 ──
     timezone: str = "Asia/Shanghai"
     inject_current_time: bool = True
 
-    # ── 历史会话检索 ──
     history_recall_top_k: int = 5
     history_snippet_max_len: int = 500
 
-    # ── 调试 ──
     verbose: bool = False
 
-    # ── 会话存储 ──
     session_backend: str = Field(default="memory", description="memory | redis")
     redis_host: str = "localhost"
     redis_port: int = 6379
@@ -180,7 +164,6 @@ class AgentConfig(BaseSettings):
         extra="ignore",
     )
 
-
 # ============================================================
 # 单例配置
 # ============================================================
@@ -188,13 +171,11 @@ _api_config: Optional[APIConfig] = None
 _agent_config: Optional[AgentConfig] = None
 _tdai_config: Optional[TdaiConfig] = None
 
-
 def get_api_config() -> APIConfig:
     global _api_config
     if _api_config is None:
         _api_config = APIConfig()
     return _api_config
-
 
 def get_agent_config() -> AgentConfig:
     global _agent_config
@@ -202,13 +183,11 @@ def get_agent_config() -> AgentConfig:
         _agent_config = AgentConfig()
     return _agent_config
 
-
 def get_tdai_config() -> TdaiConfig:
     global _tdai_config
     if _tdai_config is None:
         _tdai_config = TdaiConfig()
     return _tdai_config
-
 
 def resolve_llm_connection() -> dict:
     cfg = get_api_config()
@@ -220,7 +199,7 @@ def resolve_llm_connection() -> dict:
 
     if preset:
         base = preset.get("api_base", base)
-        if cfg.llm_model == "gpt-4o-mini":
+        if cfg.llm_model in ["gpt-4o-mini", "qwen-turbo", "deepseek-chat"]:
             model = preset.get("model", model)
 
     return {"base": base, "model": model}
