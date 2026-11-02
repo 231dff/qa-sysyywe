@@ -1,15 +1,17 @@
 # ============================================================
-# 智能搜索助手 — 实时联网搜索 Agent 系统
-# 依赖清单 (兼容性修复版 v3)
+# 智能搜索助手 — 依赖清单 (LangChain 1.x 生态)
 # ============================================================
 
-# ———— LLM & Agent 框架 ————
-langchain-core==0.3.52
-langchain-mcp-adapters==0.1.14
-langchain==0.3.21
-langchain-community==0.3.20
-langchain-openai==0.3.5
-langgraph==0.2.70
+# ———— LLM & Agent 框架 (1.x) ————
+langchain>=1.0,<2.0
+langchain-core>=1.0,<2.0
+langgraph>=1.0,<2.0
+langchain-openai>=1.0,<2.0
+langchain-deepseek>=1.0,<2.0
+
+# ———— MCP (1.x 内置 langchain.mcp) ————
+# 注意：不再需要 langchain-mcp-adapters（已被 langchain[mcp] 替代）
+langchain[mcp]>=1.0,<2.0
 
 # ———— Web 后端 ————
 fastapi==0.115.8
@@ -23,6 +25,7 @@ requests==2.32.3
 python-dotenv==1.0.1
 pydantic==2.10.6
 pydantic-settings==2.7.1
+pyyaml==6.0.2   
 
 # ———— Token 计数 ————
 tiktoken==0.8.0
@@ -40,6 +43,8 @@ pytest-asyncio==0.25.3
 pytest-mock==3.14.0
 pytest-cov==6.0.0
 
+# ———— Redis 客户端 ————
+# FT.SEARCH / 向量索引需要 Redis 服务器 >= 7.4 或 Redis Stack
 redis==5.2.1
 
 # ==================== 可观测性 ====================
@@ -48,13 +53,9 @@ opentelemetry-sdk==1.29.0
 opentelemetry-exporter-otlp-proto-http==1.29.0
 opentelemetry-instrumentation-fastapi==0.50b0
 opentelemetry-instrumentation-httpx==0.50b0
-openinference-instrumentation-langchain==0.1.33
-langfuse==2.59.7
+openinference-instrumentation-langchain>=0.1.33
+langfuse>=2.59.7
 
-# ———— MCP ————
-# ★ 核心修复：适配器升级到 0.1.14，mcp 升级到 1.9.2
-langchain-mcp-adapters==0.1.14
-mcp==1.11.0
-
+# ———— 网页提取 & 重排 ————
 trafilatura==2.0.0
 scikit-learn==1.6.1

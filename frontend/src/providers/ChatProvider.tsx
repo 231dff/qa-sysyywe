@@ -141,7 +141,6 @@ export default function ChatProvider({
           }));
           setMessagesMap(prev => ({ ...prev, [sid]: history }));
         } catch (e: any) {
-          console.error("切换会话失败", e);
           setMessagesMap(prev => ({ ...prev, [sid]: [] }));
         } finally {
           setSessionsLoading(false);
@@ -154,21 +153,16 @@ export default function ChatProvider({
   const removeSession = useCallback(
     async (sid: string) => {
       if (!userId) return;
-      try {
-        await apiDeleteSession(sid, userId);
-      } catch (e) { 
-        console.error("删除会话接口报错", e); 
-      } finally {
-        const current = getLocalSessions().filter((s) => s.session_id !== sid);
-        saveLocalSessions(current);
-        setSessions(current);
-        if (sid === sessionId) setSessionId(generateSessionId());
-        setMessagesMap(prev => {
-          const next = { ...prev };
-          delete next[sid];
-          return next;
-        });
-      }
+      try { await apiDeleteSession(sid, userId); } catch (e) {} 
+      const current = getLocalSessions().filter((s) => s.session_id !== sid);
+      saveLocalSessions(current);
+      setSessions(current);
+      if (sid === sessionId) setSessionId(generateSessionId());
+      setMessagesMap(prev => {
+        const next = { ...prev };
+        delete next[sid];
+        return next;
+      });
     },
     [userId, sessionId]
   );
@@ -182,13 +176,8 @@ export default function ChatProvider({
     }
   }, [sessionId]);
 
-  const newSession = useCallback(() => {
-    setSessionId(generateSessionId());
-  }, []);
-
-  const updateSettings = useCallback((s: Partial<UserSettings>) => {
-    setSettings((prev) => ({ ...prev, ...s }));
-  }, []);
+  const newSession = useCallback(() => { setSessionId(generateSessionId()); }, []);
+  const updateSettings = useCallback((s: Partial<UserSettings>) => { setSettings((prev) => ({ ...prev, ...s })); }, []);
 
   const sendMessage = useCallback(
     async (content: string, options?: { deepThink: boolean; webSearch: boolean }) => {
@@ -227,10 +216,11 @@ export default function ChatProvider({
         if (savedMcp) customMcp = JSON.parse(savedMcp);
       } catch (e) {}
 
+      // ★ 核心修改：把前端设置弹窗里填的 base 和 key 传给后端
       const request: ChatRequest = {
         query: content, session_id: sid, user_id: userId,
-        model: customConfig.model || settings.model,
-        llm_provider: customConfig.provider || undefined,
+        model: customConfig.model || settings.model || "qwen3.8-max",
+        provider: customConfig.provider || "qwen", 
         api_base: customConfig.apiBase || undefined,
         api_key: customConfig.apiKey || undefined,
         mcp_config: Object.keys(customMcp).length > 0 ? customMcp : undefined,
@@ -292,7 +282,6 @@ export default function ChatProvider({
         if (err.name === "AbortError") {
           setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "aborted" } }));
         } else {
-          // ★ 兜底：如果网络真的挂了，前端显示友善提示，绝不抛出 network error 恶心用户
           setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "error", error: err.message === "network error" ? "网络连接异常，请检查网络后重试。" : err.message } }));
         }
       } finally {
@@ -377,12 +366,36 @@ function handleSSEEvent(
   setSseStateMap(prev => {
     const state = prev[sid] || DEFAULT_SSE_STATE;
     switch (eventType) {
-      case "progress":
-        return { ...prev, [sid]: { ...state, progressMessage: data.message } };
+      case "progress": {
+        const now = Date.now();
+        const startTime = state.thinkingStartTime || now;
+        
+        if (data.message.includes("正在思考如何回答")) {
+           return { ...prev, [sid]: { ...state, progressMessage: data.message, isThinking: true, thinkingStartTime: startTime } };
+        }
+
+        const progressLog = `\n- **${data.message}**\n`;
+        
+        return { 
+          ...prev, 
+          [sid]: { 
+            ...state, 
+            progressMessage: data.message, 
+            isThinking: true,
+            thinkingStartTime: startTime,
+            reasoningText: state.reasoningText.includes(data.message) 
+                           ? state.reasoningText 
+                           : state.reasoningText + progressLog
+          } 
+        };
+      }
       case "reasoning": {
         const now = Date.now();
         const startTime = state.thinkingStartTime || now;
-        return { ...prev, [sid]: { ...state, isThinking: true, thinkingStartTime: startTime, reasoningText: state.reasoningText + data.text } };
+        return { 
+          ...prev, 
+          [sid]: { ...state, isThinking: true, thinkingStartTime: startTime, reasoningText: state.reasoningText + data.text } 
+        };
       }
       case "token": {
         let duration = state.reasoningDuration;
@@ -391,7 +404,10 @@ function handleSSEEvent(
           duration = Math.round((Date.now() - state.thinkingStartTime) / 1000);
           isThinking = false;
         }
-        return { ...prev, [sid]: { ...state, isThinking, reasoningDuration: duration, tokens: state.tokens + data.text, progressMessage: null } };
+        return { 
+          ...prev, 
+          [sid]: { ...state, isThinking, reasoningDuration: duration, tokens: state.tokens + data.text, progressMessage: null } 
+        };
       }
       case "heartbeat": return prev;
       case "sources": return { ...prev, [sid]: { ...state, sources: data.sources } };

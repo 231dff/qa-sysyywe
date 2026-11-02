@@ -1,12 +1,9 @@
 """
 智能搜索助手 — 护栏与安全层
 
-基于《深入理解 AI Agent》1.2.6（护栏与安全）、2.4.7（提示注入）、3.1.8（日志脱敏）：
-
-1. 提示注入检测：识别试图覆盖系统指令的恶意输入
-2. 敏感信息脱敏：日志/输出中的 API Key、邮箱、手机号、身份证号脱敏
-3. 输出护栏：检测危险/越权内容标记
-4. 工具调用护栏：白名单 + 频率限制（由调用方在工具执行前检查）
+★ 修 21：_SENSITIVE_FIELDS 移除 "session"，
+   session_id 是排障关键字段，不应被当成敏感值整体掩码。
+   保留 session_token / session_secret / session_key 等真正的敏感字段。
 """
 from __future__ import annotations
 
@@ -18,29 +15,18 @@ from typing import Optional
 # ============================================================
 # 提示注入检测
 # ============================================================
-# 直接/间接注入的常见模式
 _INJECTION_PATTERNS: list[re.Pattern] = [
-    # 试图覆盖系统提示（忽略/忘记/忘掉 + 指令/规则/设定/限制）
     re.compile(r"(忽略|无视|忘记|忘掉|跳过|抛弃)[^\n]{0,30}(之前|上述|以上|所有|系统)?[^\n]{0,20}(指令|提示|规则|设定|限制)", re.IGNORECASE),
-    # 角色扮演越狱（你现在是 / 扮演 / 假装(是/你是) / 从现在开始你是）
     re.compile(r"(你现在是|扮演|假装是|假装你是|从现在开始你是)[^\n]{0,40}", re.IGNORECASE),
-    # 要求泄露系统提示（正向：系统提示→泄露；反向：泄露/打印→系统提示）
     re.compile(r"(系统提示|system prompt)[^\n]{0,20}(泄露|泄漏|打印|输出|显示|告诉我)", re.IGNORECASE),
     re.compile(r"(泄露|泄漏|打印|输出|显示|告诉我)[^\n]{0,20}(系统提示|system prompt)", re.IGNORECASE),
-    # 编码绕过：检测具体 base64 编码内容样例 + 「base64 + 解码/执行」危险意图
-    # （不匹配裸「base64」词，避免误伤「Python 的 base64 模块怎么用」等正常技术提问）
     re.compile(r"(aGVsbG8|IHN5c3RlbQ)", re.IGNORECASE),
     re.compile(r"base64[^\n]{0,10}(解码|decode|执行|还原|绕过)", re.IGNORECASE),
-    # 要求突破工具/权限边界
     re.compile(r"(绕过|突破|bypass)[^\n]{0,30}(限制|权限|过滤|安全|审查)", re.IGNORECASE),
 ]
 
 
 def detect_prompt_injection(text: str) -> tuple[bool, list[str]]:
-    """
-    检测提示注入。返回 (是否命中, 命中的规则描述列表)。
-    不返回敏感内容本身，仅返回命中的规则类别，避免二次泄露。
-    """
     if not text:
         return False, []
     hits: list[str] = []
@@ -53,13 +39,13 @@ def detect_prompt_injection(text: str) -> tuple[bool, list[str]]:
 # ============================================================
 # 敏感信息脱敏
 # ============================================================
-# 需要脱敏的字段名（无论值是什么，直接掩码）
+# ★ 修 21：移除 "session"；只保留真正的凭据/令牌字段
 _SENSITIVE_FIELDS = {
     "api_key", "apikey", "api-key", "token", "secret", "password", "passwd",
-    "authorization", "tavily_api_key", "llm_api_key", "cookie", "session",
+    "authorization", "tavily_api_key", "llm_api_key", "cookie",
+    "session_token", "session_secret", "session_key",
 }
 
-# 常见敏感值模式
 _SENSITIVE_VALUE_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("email", re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")),
     ("phone", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
@@ -72,7 +58,6 @@ _SENSITIVE_VALUE_PATTERNS: list[tuple[str, re.Pattern]] = [
 
 
 def redact_text(text: str) -> str:
-    """对文本中的敏感信息做脱敏，返回脱敏后的安全文本。"""
     if not text:
         return text
     result = text
@@ -82,14 +67,12 @@ def redact_text(text: str) -> str:
 
 
 def redact_kv(key: str, value: str) -> str:
-    """对键值对做脱敏：若键名是敏感字段则整体掩码，否则仅对值做模式脱敏。"""
     if key.lower() in _SENSITIVE_FIELDS:
         return "***"
     return redact_text(value)
 
 
 def sanitize_log(message: str) -> str:
-    """日志脱敏：对任意日志字符串做敏感信息清洗。"""
     return redact_text(message)
 
 
@@ -105,10 +88,6 @@ class GuardResult:
 
 
 def check_output_guardrails(text: str) -> GuardResult:
-    """
-    对最终回答做输出护栏检查。
-    当前仅做提示注入/明显越权的软标记，不做激进阻断，返回标记信息供上游决定。
-    """
     injected, _ = detect_prompt_injection(text)
     if injected:
         return GuardResult(safe=False, blocked=False, reason="回答中包含可疑指令回显", flagged=["prompt_injection_echo"])
@@ -116,10 +95,6 @@ def check_output_guardrails(text: str) -> GuardResult:
 
 
 def check_input_guardrails(text: str) -> GuardResult:
-    """
-    对用户输入做护栏检查。
-    命中提示注入时阻断（blocked=True），由调用方决定降级还是拒绝。
-    """
     injected, hits = detect_prompt_injection(text)
     if injected:
         return GuardResult(safe=False, blocked=True, reason="检测到疑似提示注入", flagged=hits)
@@ -129,13 +104,7 @@ def check_input_guardrails(text: str) -> GuardResult:
 # ============================================================
 # 工具调用护栏
 # ============================================================
-# 允许的搜索域名白名单（可选，空 = 不限，由 config.include_domains 控制）
 def validate_tool_call(tool_name: str, tool_args: dict, allowed_tools: Optional[set[str]] = None) -> GuardResult:
-    """
-    工具调用前的护栏检查：
-    - 工具名是否在允许集合内
-    - search 的 query 是否为空/超长
-    """
     if allowed_tools is not None and tool_name not in allowed_tools:
         return GuardResult(safe=False, blocked=True, reason=f"工具 {tool_name} 不在允许列表", flagged=["tool_not_allowed"])
 

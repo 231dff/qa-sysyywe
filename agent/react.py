@@ -1,5 +1,5 @@
 """
-智能搜索助手 — ReAct Agent
+智能搜索助手 — ReAct Agent (LangChain 1.x，极简连接版)
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ os.environ["LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S"] = "0"
 import json
 import time
 import hashlib
+from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -16,9 +17,8 @@ from zoneinfo import ZoneInfo
 from langchain_core.messages import (
     AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
 )
-from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphRecursionError
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from agent.models import GeneratedAnswer, Source
 from agent.tools import (
@@ -26,10 +26,11 @@ from agent.tools import (
     knowledge_search, read_tool_output, reset_tool_counts, search,
     set_current_user_id, spawn_search_worker, set_llm_context,
 )
-from config import get_agent_config, get_api_config, resolve_llm_connection, PROVIDER_PRESETS
+from config import get_agent_config, get_api_config, resolve_llm_connection
 from tools.registry import generate_fallback_answer
 from utils.context import compress_history
 from utils.helpers import count_tokens
+from utils.llm_factory import build_llm
 
 _GLOBAL_MCP_TOOLS = []
 _MCP_TOOLS_CACHE = {}
@@ -90,21 +91,9 @@ BASE_SYSTEM_PROMPT = """你是一个实时信息问答助手，请直接回答�
 - **格式**: 使用 Markdown，保持简洁。"""
 
 
-def _get_llm_kwargs(model_name: str, base_url: str, enable_deep_think: bool) -> dict:
-    """
-    ★ 条件化思考控制引擎 (API 层)
-    """
-    kwargs = {}
-    model_lower = model_name.lower()
-    
-    # 阿里云 Qwen 系列
-    if "qwen" in model_lower or "dashscope" in base_url:
-        kwargs["extra_body"] = {"enable_thinking": enable_deep_think}
-        
-    return kwargs
-
-
 class ReactAgent:
+    _GRAPH_CACHE_MAX = 32
+
     def __init__(self, verbose: bool = False):
         api_cfg = get_api_config()
         agent_cfg = get_agent_config()
@@ -113,67 +102,63 @@ class ReactAgent:
             agent_cfg.verbose = True
 
         conn = resolve_llm_connection()
-        
-        # 默认实例化开启思考
-        llm_extra_kwargs = _get_llm_kwargs(conn["model"], conn["base"], True)
-        
-        self._llm = ChatOpenAI(
+
+        self._llm = build_llm(
             model=conn["model"],
             base_url=conn["base"],
             api_key=api_cfg.llm_api_key.get_secret_value(),
             temperature=agent_cfg.react_temperature,
-            streaming=True,
-            max_retries=3,
-            **llm_extra_kwargs
         )
-        
-        all_tools = self._get_base_tools() + _GLOBAL_MCP_TOOLS
 
-        self._graph = create_react_agent(
-            self._llm,
+        all_tools = self._get_base_tools() + _GLOBAL_MCP_TOOLS
+        self._graph = create_agent(
+            model=self._llm,
             tools=all_tools,
-            prompt=BASE_SYSTEM_PROMPT,
+            system_prompt=BASE_SYSTEM_PROMPT,
         )
-        
-        self._recursion_limit = agent_cfg.react_recursion_limit
-        if self._recursion_limit < 40:
-            self._recursion_limit = 40
+
+        self._recursion_limit = max(agent_cfg.react_recursion_limit, 40)
+        self._graph_cache: OrderedDict[tuple, tuple] = OrderedDict()
 
     def _get_base_tools(self):
         return [
-            spawn_search_worker,
-            search,
-            read_tool_output,
-            knowledge_search,
-            graph_search,
-            history_search,
-            calculator,
-            current_time,
+            spawn_search_worker, search, read_tool_output,
+            knowledge_search, graph_search, history_search,
+            calculator, current_time,
         ]
 
     async def _load_dynamic_mcp(self, mcp_config: dict):
         if not mcp_config:
             return _GLOBAL_MCP_TOOLS
-            
         config_key = hashlib.md5(json.dumps(mcp_config, sort_keys=True).encode()).hexdigest()
         if config_key in _MCP_TOOLS_CACHE:
             return _MCP_TOOLS_CACHE[config_key]
-            
         try:
-            from langchain_mcp_adapters.client import MultiServerMCPClient
+            from langchain.mcp import MCPAdapter
             print(f"[MCP] 动态加载前端配置: {mcp_config}")
-            client = MultiServerMCPClient(mcp_config)
-            tools = await client.get_tools()
+            async with MCPAdapter(mcp_config) as adapter:
+                tools = await adapter.get_tools()
             _MCP_TOOLS_CACHE[config_key] = tools
             return tools
         except Exception as e:
             print(f"[MCP] 动态加载失败: {e}")
             return _GLOBAL_MCP_TOOLS
 
+    @staticmethod
+    def _graph_cache_key(model, base, api_key, deep_think, search_on, mcp_tools) -> tuple:
+        mcp_sig = ",".join(sorted(t.name for t in mcp_tools)) if mcp_tools else ""
+        return (
+            model or "",
+            base or "",
+            hashlib.md5((api_key or "").encode()).hexdigest()[:16],
+            bool(deep_think),
+            bool(search_on),
+            hashlib.md5(mcp_sig.encode()).hexdigest()[:8],
+        )
+
     def _get_active_graph(
-        self, 
+        self,
         model_override: Optional[str] = None,
-        llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         mcp_tools: Optional[list] = None,
@@ -181,53 +166,53 @@ class ReactAgent:
         enable_search: bool = True,
     ):
         active_mcp = mcp_tools if mcp_tools is not None else _GLOBAL_MCP_TOOLS
+
+        conn = resolve_llm_connection()
+        api_cfg = get_api_config()
+
+        final_model = model_override or conn["model"]
+        final_base = api_base or conn["base"]
+        final_key = api_key or api_cfg.llm_api_key.get_secret_value()
+
+        key = self._graph_cache_key(
+            final_model, final_base, final_key,
+            enable_deep_think, enable_search, active_mcp,
+        )
+
+        if key in self._graph_cache:
+            self._graph_cache.move_to_end(key)
+            return self._graph_cache[key]
+
         all_tools = self._get_base_tools() + active_mcp
-
-        # 1. 动态过滤工具：如果关闭搜索，直接剥夺联网能力
         if not enable_search:
-            all_tools = [t for t in all_tools if t.name not in ["search", "spawn_search_worker", "read_tool_output"]]
+            all_tools = [
+                t for t in all_tools
+                if t.name not in ["search", "spawn_search_worker", "read_tool_output"]
+            ]
 
-        # 2. 动态拼接 Prompt
         active_prompt = BASE_SYSTEM_PROMPT
         if not enable_deep_think:
             active_prompt += "\n\n## ★ 最高优先级指令\n当前用户已关闭深度思考。严禁输出任何 `<thought>` 标签，直接给出最终回答！"
         if not enable_search:
             active_prompt += "\n\n## ★ 最高优先级指令\n当前用户已关闭联网搜索。严禁使用任何检索工具，请完全基于你的内置知识作答，如果不确定请如实告知。"
 
-        # ★ 核心修复：必须重新实例化 LLM 以注入正确的思考参数！
-        conn = resolve_llm_connection()
-        api_cfg = get_api_config()
-        preset = PROVIDER_PRESETS.get((llm_provider or "").lower(), {})
-        
-        final_model = model_override or preset.get("model") or conn["model"]
-        final_base = api_base or preset.get("api_base") or conn["base"]
-        final_key = api_key or api_cfg.llm_api_key.get_secret_value()
+        dynamic_llm = build_llm(
+            model=final_model,
+            base_url=final_base,
+            api_key=final_key,
+            temperature=get_agent_config().react_temperature,
+        )
+        dynamic_graph = create_agent(
+            model=dynamic_llm,
+            tools=all_tools,
+            system_prompt=active_prompt,
+        )
 
-        # 获取动态 API 参数 (包含 enable_thinking)
-        llm_extra_kwargs = _get_llm_kwargs(final_model, final_base, enable_deep_think)
+        self._graph_cache[key] = (dynamic_graph, dynamic_llm)
+        if len(self._graph_cache) > self._GRAPH_CACHE_MAX:
+            self._graph_cache.popitem(last=False)
 
-        try:
-            dynamic_llm = ChatOpenAI(
-                model=final_model,
-                base_url=final_base,
-                api_key=final_key,
-                temperature=get_agent_config().react_temperature,
-                streaming=True,
-                max_retries=3,
-                **llm_extra_kwargs
-            )
-            
-            dynamic_graph = create_react_agent(
-                dynamic_llm,
-                tools=all_tools,
-                prompt=active_prompt,
-            )
-            return dynamic_graph, dynamic_llm
-        except Exception as e:
-            print(f"[React] 动态实例化模型失败，回退到默认配置: {e}")
-            # 如果因为传参失败崩溃，回退到不带思考开关的默认实例
-            fallback_graph = create_react_agent(self._llm, tools=all_tools, prompt=active_prompt)
-            return fallback_graph, self._llm
+        return dynamic_graph, dynamic_llm
 
     @staticmethod
     def _to_messages(history=None, memory_context=None) -> list[BaseMessage]:
@@ -239,9 +224,12 @@ class ReactAgent:
             for msg in compressed:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
-                if role == "user": messages.append(HumanMessage(content=content))
-                elif role == "assistant": messages.append(AIMessage(content=content))
-                elif role == "system": messages.append(SystemMessage(content=content))
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    messages.append(AIMessage(content=content))
+                elif role == "system":
+                    messages.append(SystemMessage(content=content))
 
         cfg = get_agent_config()
         try:
@@ -276,6 +264,14 @@ class ReactAgent:
                     sources.append(Source(url=url, title=item.get("title", ""), snippet=item.get("snippet", "")))
         return final_text, sources
 
+    def _resolve_context(self, api_base, api_key, model_override):
+        conn = resolve_llm_connection()
+        api_cfg = get_api_config()
+        final_base = api_base or conn["base"]
+        final_key = api_key or api_cfg.llm_api_key.get_secret_value()
+        final_model = model_override or conn["model"]
+        return final_key, final_base, final_model
+
     async def run(
         self,
         user_query: str,
@@ -283,7 +279,6 @@ class ReactAgent:
         memory_context: Optional[str] = None,
         user_id: Optional[str] = None,
         model_override: Optional[str] = None,
-        llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         mcp_config: Optional[dict] = None,
@@ -293,18 +288,16 @@ class ReactAgent:
         start = time.perf_counter()
         set_current_user_id(user_id or "")
         reset_tool_counts()
-        
+
         dynamic_mcp_tools = await self._load_dynamic_mcp(mcp_config)
-        active_graph, active_llm = self._get_active_graph(
-            model_override, llm_provider, api_base, api_key, dynamic_mcp_tools,
-            enable_deep_think=enable_deep_think, enable_search=enable_search
+        active_graph, _ = self._get_active_graph(
+            model_override, api_base, api_key, dynamic_mcp_tools,
+            enable_deep_think=enable_deep_think, enable_search=enable_search,
         )
-        
-        conn = resolve_llm_connection()
-        preset = PROVIDER_PRESETS.get((llm_provider or "").lower(), {})
-        final_base = api_base or preset.get("api_base") or conn["base"]
-        final_key = api_key or get_api_config().llm_api_key.get_secret_value()
-        final_model = model_override or preset.get("model") or conn["model"]
+
+        final_key, final_base, final_model = self._resolve_context(
+            api_base, api_key, model_override
+        )
         set_llm_context(final_key, final_base, final_model)
 
         input_messages = self._to_messages(history, memory_context=memory_context)
@@ -341,7 +334,8 @@ class ReactAgent:
         fallback_text = await generate_fallback_answer(user_query, history)
         return GeneratedAnswer(
             query=user_query, answer=fallback_text, sources=[], confidence=confidence,
-            is_fallback=True, tokens_used=count_tokens(fallback_text), latency_ms=(time.perf_counter() - start) * 1000,
+            is_fallback=True, tokens_used=count_tokens(fallback_text),
+            latency_ms=(time.perf_counter() - start) * 1000,
         )
 
     async def astream_events(
@@ -351,7 +345,6 @@ class ReactAgent:
         memory_context: Optional[str] = None,
         user_id: Optional[str] = None,
         model_override: Optional[str] = None,
-        llm_provider: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         mcp_config: Optional[dict] = None,
@@ -362,21 +355,19 @@ class ReactAgent:
         reset_tool_counts()
 
         dynamic_mcp_tools = await self._load_dynamic_mcp(mcp_config)
-        active_graph, active_llm = self._get_active_graph(
-            model_override, llm_provider, api_base, api_key, dynamic_mcp_tools,
-            enable_deep_think=enable_deep_think, enable_search=enable_search
+        active_graph, _ = self._get_active_graph(
+            model_override, api_base, api_key, dynamic_mcp_tools,
+            enable_deep_think=enable_deep_think, enable_search=enable_search,
         )
-        
-        conn = resolve_llm_connection()
-        preset = PROVIDER_PRESETS.get((llm_provider or "").lower(), {})
-        final_base = api_base or preset.get("api_base") or conn["base"]
-        final_key = api_key or get_api_config().llm_api_key.get_secret_value()
-        final_model = model_override or preset.get("model") or conn["model"]
+
+        final_key, final_base, final_model = self._resolve_context(
+            api_base, api_key, model_override
+        )
         set_llm_context(final_key, final_base, final_model)
 
         input_messages = self._to_messages(history, memory_context=memory_context)
         input_messages.append(HumanMessage(content=user_query))
-        
+
         async for event in active_graph.astream_events(
             {"messages": input_messages},
             version="v2",

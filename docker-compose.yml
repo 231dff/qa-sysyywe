@@ -10,21 +10,22 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile          # ★ 修：Dockerfile.backend 不存在
     container_name: search-backend
     restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - .env                          # ★ .env 里要加 DEEPSEEK_API_KEY 等
     environment:
       - PYTHONUNBUFFERED=1
-      # 容器内连宿主机 TencentDB-Agent-Memory Gateway（.env 里的 127.0.0.1 是本地开发用）
+      # 容器内连宿主机 TencentDB-Agent-Memory Gateway
       - TDAI_GATEWAY_URL=http://host.docker.internal:8420
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - kb_data:/app/data
+      - kb_data:/app/data             # 知识库/图谱/会话 JSONL 持久化
+      - ./providers.yaml:/app/providers.yaml:ro   # ★ 新增：Provider 配置挂载（只读）
     networks:
       - search-network
     healthcheck:
@@ -36,8 +37,8 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
+      context: ./frontend             # ★ 修：前端项目在 frontend/ 子目录
+      dockerfile: Dockerfile          # ★ 修：Dockerfile.frontend 不存在
     container_name: search-frontend
     restart: unless-stopped
     ports:

@@ -1,91 +1,79 @@
 """
 智能搜索助手 — 数据模型定义
-所有 Agent 状态、工具输入/输出均使用 Pydantic 强类型约束
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
 
 # ============================================================
-# 搜索相关
+# 搜索相关（不变）
 # ============================================================
 class SearchResult(BaseModel):
-    """单条搜索结果"""
-    url: str = Field(..., description="结果 URL")
-    title: str = Field(default="", description="标题")
-    content: str = Field(default="", description="摘要/正文片段")
-    score: float = Field(default=0.0, description="原始搜索相关性分数")
-    raw_response: Optional[dict[str, Any]] = Field(
-        default=None, description="API 原始响应 (调试用)", repr=False
-    )
+    url: str = Field(...)
+    title: str = Field(default="")
+    content: str = Field(default="")
+    score: float = Field(default=0.0)
+    raw_response: Optional[dict] = Field(default=None, repr=False)
 
 
 class SearchResponse(BaseModel):
-    """搜索 API 返回的批量结果"""
-    query: str = Field(..., description="实际搜索查询词")
+    query: str
     results: list[SearchResult] = Field(default_factory=list)
-    total_count: int = Field(default=0)
-    search_time_ms: float = Field(default=0.0)
-    error: Optional[str] = Field(default=None)
+    total_count: int = 0
+    search_time_ms: float = 0.0
+    error: Optional[str] = None
 
 
 class RelevanceScore(BaseModel):
-    """LLM 对单条结果的相关性打分"""
     url: str
     title: str
     relevance: float = Field(default=0.0, ge=0.0, le=1.0)
-    reason: str = Field(default="", description="评分理由 (简短)")
+    reason: str = Field(default="")
 
 
 class RelevanceScores(BaseModel):
-    """批量相关性打分"""
     results: list[RelevanceScore] = Field(default_factory=list)
 
 
 # ============================================================
-# 查询改写
+# 查询改写（不变）
 # ============================================================
 class RewrittenQuery(BaseModel):
-    """查询改写结果"""
-    original: str = Field(..., description="用户原始输入")
-    rewritten: str = Field(..., description="改写后的搜索查询词")
-    language: str = Field(default="zh", description="检测到的语言")
-    intent: str = Field(default="factual")
+    original: str
+    rewritten: str
+    language: str = "zh"
+    intent: str = "factual"
     sub_queries: list[str] = Field(default_factory=list)
 
 
 # ============================================================
-# 答案生成
+# 答案生成（不变）
 # ============================================================
 class Source(BaseModel):
-    """答案引用的信息源"""
     url: str
     title: str
-    snippet: str = Field(default="", description="引用的片段")
+    snippet: str = Field(default="")
 
 
 class GeneratedAnswer(BaseModel):
-    """最终生成的答案"""
-    query: str = Field(..., description="原始用户问题")
-    answer: str = Field(..., description="最终答案 (Markdown)")
+    query: str
+    answer: str
     sources: list[Source] = Field(default_factory=list)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    is_fallback: bool = Field(default=False)
-    tokens_used: int = Field(default=0)
-    latency_ms: float = Field(default=0.0)
+    is_fallback: bool = False
+    tokens_used: int = 0
+    latency_ms: float = 0.0
 
 
 # ============================================================
-# Agent 状态图 (StateGraph TypedDict)
+# Agent 状态图（不变）
 # ============================================================
 class AgentState(TypedDict, total=False):
-    """LangGraph Agent 全局状态"""
     session_id: str
     user_query: str
     user_query_raw: str
@@ -105,10 +93,9 @@ class AgentState(TypedDict, total=False):
 
 
 # ============================================================
-# 工具元数据
+# 工具元数据（不变）
 # ============================================================
 class ToolCategory(str, Enum):
-    """工具分类"""
     SEARCH = "search"
     REWRITE = "rewrite"
     RELEVANCE = "relevance"
@@ -117,7 +104,6 @@ class ToolCategory(str, Enum):
 
 @dataclass
 class ToolMetadata:
-    """工具注册元信息 — 职责单一"""
     name: str
     category: ToolCategory
     description: str
@@ -125,43 +111,98 @@ class ToolMetadata:
 
 
 # ============================================================
-# 会话与缓存
+# 会话与缓存（不变）
 # ============================================================
 @dataclass
 class SessionEntry:
-    """会话缓存条目"""
     session_id: str
     history: list[dict[str, str]] = field(default_factory=list)
     last_query: str = ""
-    created_at: float = field(default=0.0)
-    last_access: float = field(default=0.0)
+    created_at: float = 0.0
+    last_access: float = 0.0
 
     def touch(self, now: float) -> None:
         self.last_access = now
 
 
 # ============================================================
-# 限流
+# 限流（不变）
 # ============================================================
 @dataclass
 class RateLimitState:
-    """滑动窗口限流状态"""
     request_timestamps: list[float] = field(default_factory=list)
     search_timestamps: list[float] = field(default_factory=list)
 
 
 # ============================================================
-# 历史会话检索（新增）
+# 历史会话检索（不变）
 # ============================================================
 class HistoryMessage(BaseModel):
-    """单条历史消息"""
-    session_id: str = Field(..., description="所属会话 ID")
-    role: str = Field(..., description="角色: user | assistant | system")
-    content: str = Field(..., description="消息内容（已截断）")
+    session_id: str
+    role: str
+    content: str
 
 
 class HistoryRecall(BaseModel):
-    """历史会话检索结果"""
-    query: str = Field(..., description="检索查询词")
-    count: int = Field(default=0)
+    query: str
+    count: int = 0
     sessions: list[HistoryMessage] = Field(default_factory=list)
+
+
+# ============================================================
+# Provider API 模型（新增）
+# ============================================================
+class ProviderModelOut(BaseModel):
+    id: str
+    label: str = ""
+
+
+class ProviderOut(BaseModel):
+    id: str
+    label: str = ""
+    base_url: str
+    api_key_env: str
+    api: str = "openai-completions"
+    models: list[ProviderModelOut] = Field(default_factory=list)
+    # ★ 注意：绝不返回 api_key 明文，只返回 api_key_env 名称
+    has_api_key: bool = False
+
+
+class ProviderCreate(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    label: str = ""
+    base_url: str = Field(..., min_length=1)
+    api_key_env: str = Field(..., min_length=1, description="环境变量名，如 DEEPSEEK_API_KEY")
+    api: str = "openai-completions"
+    models: list[ProviderModelOut] = Field(default_factory=list)
+
+
+class ProviderUpdate(BaseModel):
+    label: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
+    api: Optional[str] = None
+    models: Optional[list[ProviderModelOut]] = None
+
+
+# ============================================================
+# 修改后的 ChatRequest（★ 移除 api_base / api_key / llm_provider）
+# ============================================================
+class ChatRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+    # ★ 新增：前端只传 provider + model
+    provider: Optional[str] = Field(None, description="Provider ID，如 deepseek-official")
+    model: Optional[str] = Field(None, description="模型 ID，如 deepseek-chat")
+
+    mcp_config: Optional[dict] = None
+    enable_deep_think: Optional[bool] = True
+    enable_search: Optional[bool] = True
+
+    fallback_provider: Optional[str] = Field(None, description="降级 Provider ID")
+    fallback_model: Optional[str] = Field(None, description="降级模型 ID")
+
+    search_depth: Optional[str] = None
+    top_k: Optional[int] = Field(None, ge=2, le=10)

@@ -1,0 +1,20 @@
+providers:
+  - id: aliyun-bailian
+    label: 阿里云百炼
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    api: openai-completions
+    models:
+      # --- 千问系列 ---
+      - id: qwen3.7-max-2026-06-08        # 官方推荐：能力与成本均衡，完整工具调用
+        label: Qwen 3.7 Max
+      - id: qwen3.7-flash-2026-07-15         # 官方推荐：最强推理与编程能力
+        label: Qwen 3.7 Flash
+      - id: qwen3.8-27b         # 你原有的模型，标签已修正
+        label: Qwen 3.8 27B
+
+      # --- DeepSeek 系列（V4，非旧版 V3/R1）---
+      - id: deepseek-v4-pro-0813    # 你原有的模型，标签已修正
+        label: DeepSeek V4 Pro
+      - id: deepseek-v4.1-flash-1017 # 官方推荐的平衡型 DeepSeek 模型
+        label: DeepSeek V4.1 Flash

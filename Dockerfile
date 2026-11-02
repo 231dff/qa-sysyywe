@@ -17,13 +17,14 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
 
-# ★ 终极抗断流版：
+# ★ requirements.txt 必须包含 pyyaml
 # 1. 通过 config 配置全局镜像源
 # 2. 将 timeout 设为 1000 秒
 # 3. 移除了 --no-cache-dir，让下载的包留在 Docker 缓存里，断网重试不用从头再来

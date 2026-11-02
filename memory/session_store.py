@@ -1,9 +1,9 @@
 """
 智能搜索助手 — 会话内存
-支持两种后端：进程内 dict（默认）/ Redis（多副本共享）
-通过环境变量 SESSION_BACKEND 切换：memory | redis
 
-两者均实现 dict 兼容接口，可直接替换 agent._sessions
+★ 修 14：RedisSessionStore 用独立 Set 维护活跃 session 计数，
+   active_sessions 为 SCARD O(1)，不再 scan_iter 全扫。
+   为保持 list_sessions 准确，仍用 SCAN（Set 可能有 TTL 过期残留）。
 """
 from __future__ import annotations
 
@@ -15,24 +15,7 @@ from typing import Optional
 from config import get_agent_config
 
 
-# ============================================================
-# dict 兼容 Mixin
-# ============================================================
 class _DictCompatMixin:
-    """
-    让 SessionStore 能像 dict 一样被使用：
-        s in store
-        store[sid]
-        store[sid] = history
-        del store[sid]
-        len(store)
-        for k in store
-        store.keys()
-        store.pop(sid, default)
-        store == {}
-    底层调用统一的 exists/get/put/delete/list_sessions/active_sessions
-    """
-
     def __contains__(self, session_id: str) -> bool:
         return self.exists(session_id)
 
@@ -52,7 +35,6 @@ class _DictCompatMixin:
         return iter(self.list_sessions())
 
     def __eq__(self, other) -> bool:
-        # 测试里 `assert agent._sessions == {}` 需要
         if isinstance(other, dict):
             if len(self) != len(other):
                 return False
@@ -73,19 +55,13 @@ class _DictCompatMixin:
         return history
 
 
-# ============================================================
-# 内存后端（单副本专用）
-# ============================================================
 class MemorySessionStore(_DictCompatMixin):
-    """线程安全的进程内会话存储"""
-
     def __init__(self, ttl_seconds: Optional[int] = None):
         self._ttl = ttl_seconds or get_agent_config().session_ttl_seconds
         self._store: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def get(self, session_id: str, default=None) -> list[dict[str, str]]:
-        """获取会话历史（自动续期）"""
+    def get(self, session_id: str, default=None):
         with self._lock:
             entry = self._store.get(session_id)
             if entry is None:
@@ -93,7 +69,7 @@ class MemorySessionStore(_DictCompatMixin):
             entry["last_access"] = time.time()
             return entry["history"]
 
-    def put(self, session_id: str, history: list[dict[str, str]]) -> None:
+    def put(self, session_id: str, history) -> None:
         with self._lock:
             self._store[session_id] = {
                 "history": history,
@@ -130,15 +106,13 @@ class MemorySessionStore(_DictCompatMixin):
             return list(self._store.keys())
 
 
-# ============================================================
-# Redis 后端（多副本共享）
-# ============================================================
 class RedisSessionStore(_DictCompatMixin):
     """
-    基于 Redis 的会话存储。
-    - Key：{prefix}{session_id}
-    - Value：JSON {history, created_at, last_access}
-    - TTL 自动过期 + 每次 get 自动续期
+    ★ 修 14：用独立 Set 维护活跃计数。
+    - put / delete 同步维护 Set
+    - active_sessions = SCARD (O(1))
+    - get 时若 key 不存在，顺手 SREM 清理 Set 残留
+    - list_sessions 仍用 SCAN（保证与真实 key 一致）
     """
 
     def __init__(self, ttl_seconds: Optional[int] = None):
@@ -146,39 +120,37 @@ class RedisSessionStore(_DictCompatMixin):
         cfg = get_agent_config()
         self._ttl = ttl_seconds or cfg.session_ttl_seconds
         self._prefix = cfg.redis_key_prefix
+        self._active_set_key = f"{self._prefix}__active__"
         self._client = redis.Redis(
-            host=cfg.redis_host,
-            port=cfg.redis_port,
-            db=cfg.redis_db,
-            password=cfg.redis_password or None,
-            decode_responses=True,
-            socket_connect_timeout=3,
-            socket_timeout=3,
+            host=cfg.redis_host, port=cfg.redis_port, db=cfg.redis_db,
+            password=cfg.redis_password or None, decode_responses=True,
+            socket_connect_timeout=3, socket_timeout=3,
         )
-        # 启动时暴露连接问题
         self._client.ping()
 
     def _key(self, session_id: str) -> str:
         return f"{self._prefix}{session_id}"
 
-    def get(self, session_id: str, default=None) -> list[dict[str, str]]:
+    def get(self, session_id: str, default=None):
         raw = self._client.get(self._key(session_id))
         if raw is None:
+            try:
+                self._client.srem(self._active_set_key, session_id)
+            except Exception:
+                pass
             return default if default is not None else []
         try:
             entry = json.loads(raw)
         except json.JSONDecodeError:
             return default if default is not None else []
         entry["last_access"] = time.time()
-        # 自动续期
         self._client.setex(
-            self._key(session_id),
-            self._ttl,
+            self._key(session_id), self._ttl,
             json.dumps(entry, ensure_ascii=False),
         )
         return entry["history"]
 
-    def put(self, session_id: str, history: list[dict[str, str]]) -> None:
+    def put(self, session_id: str, history) -> None:
         key = self._key(session_id)
         raw = self._client.get(key)
         created_at = time.time()
@@ -192,48 +164,48 @@ class RedisSessionStore(_DictCompatMixin):
             "created_at": created_at,
             "last_access": time.time(),
         }
-        self._client.setex(key, self._ttl, json.dumps(entry, ensure_ascii=False))
+        pipe = self._client.pipeline()
+        pipe.setex(key, self._ttl, json.dumps(entry, ensure_ascii=False))
+        pipe.sadd(self._active_set_key, session_id)
+        pipe.execute()
 
     def delete(self, session_id: str) -> None:
-        self._client.delete(self._key(session_id))
+        pipe = self._client.pipeline()
+        pipe.delete(self._key(session_id))
+        pipe.srem(self._active_set_key, session_id)
+        pipe.execute()
 
     def exists(self, session_id: str) -> bool:
         return self._client.exists(self._key(session_id)) > 0
 
     def cleanup_expired(self) -> int:
-        # Redis TTL 自动清理
         return 0
 
     @property
     def active_sessions(self) -> int:
-        return sum(1 for _ in self._client.scan_iter(match=f"{self._prefix}*"))
+        return int(self._client.scard(self._active_set_key))
 
     def list_sessions(self) -> list[str]:
         prefix_len = len(self._prefix)
-        return [k[prefix_len:] for k in self._client.scan_iter(match=f"{self._prefix}*")]
+        result = []
+        for k in self._client.scan_iter(match=f"{self._prefix}*"):
+            if k == self._active_set_key:
+                continue
+            result.append(k[prefix_len:])
+        return result
 
 
-# ============================================================
-# 工厂 + 单例
-# ============================================================
 _session_store: Optional[object] = None
 
 
 def get_session_store():
-    """根据 SESSION_BACKEND 环境变量返回对应的会话存储实例"""
     global _session_store
     if _session_store is not None:
         return _session_store
-
     cfg = get_agent_config()
     backend = (cfg.session_backend or "memory").lower()
-
-    if backend == "redis":
-        _session_store = RedisSessionStore()
-    else:
-        _session_store = MemorySessionStore()
+    _session_store = RedisSessionStore() if backend == "redis" else MemorySessionStore()
     return _session_store
 
 
-# 向后兼容
 SessionStore = MemorySessionStore
