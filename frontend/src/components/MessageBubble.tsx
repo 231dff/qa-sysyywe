@@ -72,7 +72,7 @@ export default function MessageBubble({
     if (msg.isThinking && isExpanded && reasoningRef.current) {
       reasoningRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [msg.reasoningText, msg.isThinking, isExpanded]);
+  }, [msg.reasoningText, msg.actions, msg.isThinking, isExpanded]);
 
   const parseContent = (text: string) => {
     let cleanText = text;
@@ -100,7 +100,7 @@ export default function MessageBubble({
   };
 
   const { cleanText, charts } = parseContent(msg.content);
-  const showThinking = !isUser && (msg.isThinking || msg.reasoningText || msg.progressMessage);
+  const showThinking = !isUser && (msg.isThinking || msg.reasoningText || msg.actions?.length || msg.progressMessage);
 
   return (
     <div className={`flex w-full mb-6 ${isUser ? "justify-end" : "justify-start"}`}>
@@ -147,6 +147,19 @@ export default function MessageBubble({
                       ref={reasoningRef}
                       className="pl-6 pr-4 text-[15px] text-gray-500 dark:text-gray-400 leading-[1.8] max-h-[400px] overflow-y-auto custom-scrollbar scroll-smooth"
                     >
+                      {/* ★ 分离展示：动作列表 */}
+                      {msg.actions && msg.actions.length > 0 && (
+                        <div className="mb-4 space-y-2">
+                          {msg.actions.map((action, idx) => (
+                            <div key={idx} className="flex items-start gap-2 text-[14px]">
+                              <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-blue-400/80 shrink-0" />
+                              <span className="text-gray-400 dark:text-gray-500">{action}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* ★ 分离展示：真正的推演过程 */}
                       <div className="prose prose-sm dark:prose-invert max-w-none 
                         prose-p:text-[15px] prose-p:my-1.5 prose-p:leading-[1.8]
                         prose-ul:text-[15px] prose-ul:my-1.5 prose-ul:pl-4
@@ -157,7 +170,7 @@ export default function MessageBubble({
                         prose-code:text-pink-600 dark:prose-code:text-pink-400 prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-code:font-normal
                       ">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.reasoningText || msg.progressMessage || "正在组织语言..."}
+                          {msg.reasoningText || (!msg.actions?.length ? msg.progressMessage || "正在组织语言..." : "")}
                         </ReactMarkdown>
                         <div className="h-2" />
                       </div>

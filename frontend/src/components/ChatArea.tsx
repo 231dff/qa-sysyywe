@@ -32,6 +32,7 @@ export default function ChatArea({ onOpenSidebar }: { onOpenSidebar: () => void 
         reasoningDuration: sse.reasoningDuration,
         isThinking: sse.isThinking,
         progressMessage: sse.progressMessage,
+        actions: sse.actions, // ★ 传递 actions
       }
     : null;
 
@@ -73,10 +74,8 @@ export default function ChatArea({ onOpenSidebar }: { onOpenSidebar: () => void 
       <div className="flex-1 overflow-y-auto px-4 py-8 pt-16 custom-scrollbar flex flex-col">
         <div className="max-w-[800px] mx-auto w-full flex-1 flex flex-col">
           {displayMessages.length === 0 && !isCurrentSessionBusy ? (
-            // ★ DeepSeek 风格的欢迎页
             <div className="flex flex-col items-center justify-center flex-1 mt-[-10vh]">
               <div className="flex items-center gap-3 mb-6">
-                {/* Logo */}
                 <div className="w-12 h-12 rounded-2xl bg-blue-500 flex items-center justify-center shadow-lg">
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
                     <path d="M12 2C12 2 13.5 8.5 22 10C13.5 11.5 12 18 12 18C12 18 10.5 11.5 2 10C10.5 8.5 12 2 12 2Z" />
@@ -91,7 +90,6 @@ export default function ChatArea({ onOpenSidebar }: { onOpenSidebar: () => void 
               </p>
             </div>
           ) : (
-            // 消息列表
             <>
               {displayMessages.map((msg) => (
                 <MessageBubble key={msg.id} msg={msg} isStreaming={msg.id === "streaming" && isCurrentSessionBusy} />

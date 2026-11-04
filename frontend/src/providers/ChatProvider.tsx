@@ -19,11 +19,13 @@ export interface SessionSSEState {
   reasoningDuration: number;
   thinkingStartTime: number | null;
   isThinking: boolean;
+  actions: string[]; // ★ 新增
 }
 
 const DEFAULT_SSE_STATE: SessionSSEState = {
   status: "idle", tokens: "", sources: [], meta: null, error: null, progressMessage: null,
   reasoningText: "", reasoningDuration: 0, thinkingStartTime: null, isThinking: false,
+  actions: [], // ★ 新增
 };
 
 const getLocalSessions = (): SessionSummary[] => {
@@ -216,7 +218,6 @@ export default function ChatProvider({
         if (savedMcp) customMcp = JSON.parse(savedMcp);
       } catch (e) {}
 
-      // ★ 核心修改：把前端设置弹窗里填的 base 和 key 传给后端
       const request: ChatRequest = {
         query: content, session_id: sid, user_id: userId,
         model: customConfig.model || settings.model || "qwen3.8-max",
@@ -308,6 +309,7 @@ export default function ChatProvider({
             id: `a_${msgCounter.current++}`, role: "assistant",
             content: sse.tokens, sources: sse.sources, meta: sse.meta || undefined,
             reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
+            actions: sse.actions, // ★ 传递给消息
           };
           return { ...prev, [sid]: [...msgs, assistantMsg] };
         });
@@ -324,6 +326,7 @@ export default function ChatProvider({
               id: `a_${msgCounter.current++}`, role: "assistant",
               content: sse.tokens + "\n\n*(已停止生成)*",
               reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
+              actions: sse.actions, // ★ 传递给消息
             };
             return { ...prev, [sid]: [...msgs, abortedMsg] };
           });
@@ -374,8 +377,8 @@ function handleSSEEvent(
            return { ...prev, [sid]: { ...state, progressMessage: data.message, isThinking: true, thinkingStartTime: startTime } };
         }
 
-        const progressLog = `\n- **${data.message}**\n`;
-        
+        if (state.actions.includes(data.message)) return prev;
+
         return { 
           ...prev, 
           [sid]: { 
@@ -383,9 +386,7 @@ function handleSSEEvent(
             progressMessage: data.message, 
             isThinking: true,
             thinkingStartTime: startTime,
-            reasoningText: state.reasoningText.includes(data.message) 
-                           ? state.reasoningText 
-                           : state.reasoningText + progressLog
+            actions: [...state.actions, data.message] // ★ 存入 actions 而不是污染 reasoningText
           } 
         };
       }

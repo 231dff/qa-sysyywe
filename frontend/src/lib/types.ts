@@ -8,7 +8,6 @@ export interface ChatRequest {
   search_depth?: string | null;
   top_k?: number | null;
   
-  // ★ 兼容旧版界面的自定义配置
   provider?: string | null; 
   api_base?: string | null;
   api_key?: string | null;
@@ -65,6 +64,7 @@ export interface ChatMessage {
   reasoningDuration?: number;
   isThinking?: boolean;
   progressMessage?: string | null;
+  actions?: string[]; // ★ 新增：动作列表
 }
 
 export interface SessionInfo {
