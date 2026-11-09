@@ -184,6 +184,7 @@ KIND_FAULT = "fault_injection"
 KIND_SECURITY = "security_audit"
 KIND_QUALITY = "quality"
 KIND_MEMORY = "memory"
+KIND_GOLDEN_E2E = "golden_e2e"  # ★ Day 3 新增：黄金集黑盒 E2E
 
 # kind -> 中文名（报告展示用）
 KIND_LABELS = {
@@ -193,6 +194,7 @@ KIND_LABELS = {
     KIND_SECURITY: "安全审计",
     KIND_QUALITY: "检索质量",
     KIND_MEMORY: "记忆",
+    KIND_GOLDEN_E2E: "黄金集 E2E",  # ★ Day 3 新增
 }
 
 
@@ -383,8 +385,12 @@ async def run_suites(
         if kinds
         else list(_REGISTRY.values())
     )
-    # 固定顺序：离线回归 → 故障注入 → 安全审计 → 在线监控 → 检索质量 → 记忆
-    order = {KIND_OFFLINE: 0, KIND_FAULT: 1, KIND_SECURITY: 2, KIND_ONLINE: 3, KIND_QUALITY: 4, KIND_MEMORY: 5}
+    # 固定顺序：离线回归 → 故障注入 → 安全审计 → 在线监控 → 检索质量 → 记忆 → 黄金集 E2E
+    order = {
+        KIND_OFFLINE: 0, KIND_FAULT: 1, KIND_SECURITY: 2,
+        KIND_ONLINE: 3, KIND_QUALITY: 4, KIND_MEMORY: 5,
+        KIND_GOLDEN_E2E: 6,  # ★ Day 3 新增：黄金集排最后，耗时最长
+    }
     suites.sort(key=lambda s: order.get(s.kind, 99))
     for suite in suites:
         start = time.perf_counter()

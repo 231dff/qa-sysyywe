@@ -1,19 +1,14 @@
 """
 智能搜索助手 — 统一评测入口
 
-一条命令跑四类企业级评测，输出 console + JSON + HTML 三种报告，
-并以门禁结果决定退出码（供 CI / pre-commit 判定）。
-
 用法:
-    python -m evals                                # 跑全部四类套件
+    python -m evals                                # 跑全部套件
     python -m evals --kind offline_regression      # 单跑离线回归
-    python -m evals --kind fault_injection
-    python -m evals --kind security_audit
-    python -m evals --kind online_monitoring
-    python -m evals --kind online_monitoring --probe   # 探测运行中后端实测 SLA
+    python -m evals --kind golden_e2e              # 单跑黄金集 E2E
+    python -m evals --kind golden_e2e --only-ids test_001,test_002 --concurrency 2
     python -m evals --list                         # 列出已注册套件
     python -m evals -o report.json                 # 指定报告路径
-    python -m evals --html                         # 额外输出 HTML 报告
+    python -m evals --html                         # 额外输出 HTML
 """
 from __future__ import annotations
 
@@ -25,13 +20,16 @@ from pathlib import Path
 from evals import core
 
 # 导入套件以触发注册
-from evals import offline, fault_injection, security_audit, online, quality, memory_suite  # noqa: F401
+from evals import (
+    offline, fault_injection, security_audit, online,
+    quality, memory_suite, golden_e2e,  # noqa: F401
+)
 
 
 def _print_console(report: core.Report) -> None:
     sep = "=" * 68
     print(f"\n{sep}")
-    print("  企业级评测报告 — 离线回归 + 在线监控 + 故障注入 + 安全审计 + 检索质量")
+    print("  企业级评测报告")
     print(f"  {report.timestamp[:19].replace('T', ' ')}")
     print(sep)
 
@@ -52,7 +50,6 @@ def _print_console(report: core.Report) -> None:
             print(f"        ! {s.error}")
         for k, v in s.summary.items():
             print(f"        {k}: {v}")
-        # 失败用例摘要（观测项单独标注 OBS，不计入门禁）
         failures = [c for c in s.cases if not c.passed]
         for c in failures[:20]:
             status = "ERR" if c.error else ("OBS" if c.observational else "FAIL")
@@ -71,13 +68,22 @@ def _print_console(report: core.Report) -> None:
 async def _main() -> int:
     ap = argparse.ArgumentParser(description="企业级评测统一入口")
     ap.add_argument("--kind", choices=[
-        core.KIND_OFFLINE, core.KIND_ONLINE, core.KIND_FAULT, core.KIND_SECURITY, core.KIND_QUALITY, core.KIND_MEMORY,
+        core.KIND_OFFLINE, core.KIND_ONLINE, core.KIND_FAULT,
+        core.KIND_SECURITY, core.KIND_QUALITY, core.KIND_MEMORY,
+        core.KIND_GOLDEN_E2E,
     ], default=None, help="仅运行指定类型的套件")
-    ap.add_argument("--probe", action="store_true", help="在线监控：探测运行中的后端实测 SLA")
-    ap.add_argument("--judge", action="store_true", help="检索质量：额外启用 LLM-as-judge 忠实度评测（需真实 API key）")
+    ap.add_argument("--probe", action="store_true", help="在线监控：探测运行中的后端")
+    ap.add_argument("--judge", action="store_true", help="检索质量：启用 LLM-as-judge")
     ap.add_argument("--list", action="store_true", help="列出已注册套件")
     ap.add_argument("-o", "--output", default=None, help="JSON 报告输出路径")
     ap.add_argument("--html", action="store_true", help="额外输出 HTML 报告")
+    # golden_e2e 专用
+    ap.add_argument("--only-ids", default=None,
+                    help="仅跑指定 id，逗号分隔（例: test_001,test_002）")
+    ap.add_argument("--concurrency", type=int, default=None,
+                    help="golden_e2e 并发数")
+    ap.add_argument("--dataset", default=None,
+                    help="golden_e2e 数据集路径")
     args = ap.parse_args()
 
     if args.list:
@@ -87,17 +93,26 @@ async def _main() -> int:
         print()
         return 0
 
-    # 在线监控是否探测实测 SLA
     if args.probe:
-        online_suite = core.get_suite(core.KIND_ONLINE)
-        if online_suite is not None:
-            online_suite.probe = True
+        suite = core.get_suite(core.KIND_ONLINE)
+        if suite is not None:
+            suite.probe = True
 
-    # 检索质量是否启用 LLM-as-judge
     if args.judge:
-        quality_suite = core.get_suite(core.KIND_QUALITY)
-        if quality_suite is not None:
-            quality_suite.judge = True
+        suite = core.get_suite(core.KIND_QUALITY)
+        if suite is not None:
+            suite.judge = True
+
+    # golden_e2e 参数覆盖
+    if args.only_ids or args.concurrency or args.dataset:
+        suite = core.get_suite(core.KIND_GOLDEN_E2E)
+        if suite is not None:
+            if args.only_ids:
+                suite.only_ids = [x.strip() for x in args.only_ids.split(",") if x.strip()]
+            if args.concurrency:
+                suite.concurrency = args.concurrency
+            if args.dataset:
+                suite.dataset_path = Path(args.dataset)
 
     kinds = [args.kind] if args.kind else None
     report = await core.run_suites(kinds)
@@ -115,8 +130,6 @@ async def _main() -> int:
 
 
 def main() -> int:
-    # Windows 控制台默认 GBK，无法编码 ✗/⚠️ 等符号，一旦有失败断言即崩溃；
-    # 统一 stdout/stderr 为 UTF-8，与 JSON/HTML 报告编码一致。
     for _stream in (sys.stdout, sys.stderr):
         try:
             _stream.reconfigure(encoding="utf-8")
