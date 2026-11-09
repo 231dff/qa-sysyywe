@@ -1,0 +1,10 @@
+spec:
+  template:
+    spec:
+      containers:
+        - name: qa-sysyywe
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PYTHONFAULTHANDLER
+              value: "1"

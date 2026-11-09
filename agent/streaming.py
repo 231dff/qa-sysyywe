@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import traceback
 import time
 import asyncio
 import re
@@ -26,8 +28,32 @@ from utils.helpers import count_tokens, generate_session_id
 from utils.llm_factory import build_llm
 
 
+# ============================================================
+# Unicode 安全层
+# ============================================================
+# 背景：LLM 流式 chunk 在 emoji / 4字节字符被切断时，会产生
+# 孤立 surrogate（如 "\ud83d"），Python str 允许构造，但 str.encode("utf-8")
+# 会抛 UnicodeEncodeError。下游 Starlette StreamingResponse 编码时必然触发。
+# 所有经 SSE 输出的字符串必须先过 _safe_str。
+# ============================================================
+def _safe_str(value) -> str:
+    """确保字符串可以被 UTF-8 编码，孤立 surrogate 替换为 '?'。"""
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            return ""
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def _sse_event(event: str, data: dict) -> str:
     payload = json.dumps(data, ensure_ascii=False)
+    payload = _safe_str(payload)
+    event = _safe_str(event)
     return f"event: {event}\ndata: {payload}\n\n"
 
 
@@ -43,8 +69,8 @@ def _extract_sources_from_tool_output(output) -> list[Source]:
                 sources.append(
                     Source(
                         url=url,
-                        title=item.get("title", ""),
-                        snippet=item.get("snippet", ""),
+                        title=_safe_str(item.get("title", "")),
+                        snippet=_safe_str(item.get("snippet", "")),
                     )
                 )
 
@@ -87,7 +113,7 @@ async def run_stream_sse(
         agent._sessions[session_id] = restored
     history = agent._sessions[session_id]
 
-    history.append({"role": "user", "content": user_query})
+    history.append({"role": "user", "content": _safe_str(user_query)})
     agent._sessions[session_id] = history
 
     start = time.perf_counter()
@@ -98,8 +124,6 @@ async def run_stream_sse(
     tag_buffer = ""
 
     is_fallback_mode = False
-    
-    # ★ 用于收集工具返回的原始内容，以便在模型哑火时强行喂给它
     last_tool_output = ""
 
     try:
@@ -132,12 +156,12 @@ async def run_stream_sse(
 
         while True:
             try:
-                # 放宽超时时间
-                timeout = 20.0 if first_chunk_received else 45.0
+                timeout = 20.0 if first_chunk_received else 60.0
                 event = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
             except asyncio.TimeoutError:
                 if not first_chunk_received and not is_fallback_mode:
                     print("[SSE] 主模型响应超时，触发降级策略...")
+                    sys.stdout.flush()
                     is_fallback_mode = True
                     yield _sse_event(
                         "progress",
@@ -168,6 +192,7 @@ async def run_stream_sse(
                         continue
                     except Exception as e:
                         print(f"[SSE] 降级模型请求失败: {e}")
+                        sys.stdout.flush()
                         yield _sse_event("error", {"message": "降级模型请求失败", "code": "FallbackError"})
                         break
                 else:
@@ -178,6 +203,9 @@ async def run_stream_sse(
 
             if is_fallback_mode:
                 text = getattr(event, "content", "") or ""
+                if not isinstance(text, str):
+                    text = str(text)
+                text = _safe_str(text)
                 if text:
                     first_chunk_received = True
                     answer_text += text
@@ -193,6 +221,10 @@ async def run_stream_sse(
                     continue
 
                 text = getattr(chunk, "content", "") or ""
+                if not isinstance(text, str):
+                    text = str(text)
+                text = _safe_str(text)
+
                 reasoning = ""
                 if hasattr(chunk, "additional_kwargs"):
                     reasoning = (
@@ -201,6 +233,7 @@ async def run_stream_sse(
                     )
                 if not reasoning and hasattr(chunk, "response_metadata"):
                     reasoning = chunk.response_metadata.get("reasoning_content", "")
+                reasoning = _safe_str(reasoning) if reasoning else ""
 
                 if reasoning:
                     yield _sse_event("reasoning", {"text": reasoning})
@@ -245,11 +278,8 @@ async def run_stream_sse(
             elif kind == "on_tool_start":
                 name = event.get("name", "")
                 if "search" in name:
-                    if answer_text:
-                        yield _sse_event("reset_tokens", {})
-                    answer_text = ""
                     tool_input = data.get("input", {}) or {}
-                    q = tool_input.get("query", "") or ""
+                    q = _safe_str(tool_input.get("query", "") or "")
                     yield _sse_event(
                         "progress",
                         {"node": "search", "message": f"正在深度检索并精读网页: {q[:30]}..."},
@@ -267,56 +297,58 @@ async def run_stream_sse(
                         "progress",
                         {"node": "generate", "message": "网页精读完毕，正在提炼核心事实并生成回答..."},
                     )
-                
-                # ★ 记录最后一次工具的输出，用于后续抢救
+
                 raw_out = data.get("output")
                 if isinstance(raw_out, ToolMessage):
-                    last_tool_output = raw_out.content
+                    last_tool_output = _safe_str(raw_out.content) if isinstance(raw_out.content, str) else str(raw_out.content)
                 elif isinstance(raw_out, str):
-                    last_tool_output = raw_out
-                    
+                    last_tool_output = _safe_str(raw_out)
+
                 for s in _extract_sources_from_tool_output(raw_out):
                     if not any(x.url == s.url for x in sources):
                         sources.append(s)
 
-        # ============================================================
-        # ★ 核心抢救机制：如果流结束了，但模型 0 Token 输出（憋死了）
-        # ============================================================
+        # 空回复兜底机制
         if not answer_text.strip() and not is_fallback_mode:
             print("[SSE] 检测到模型空回复，启动强制收尾机制...")
+            sys.stdout.flush()
             yield _sse_event("progress", {"node": "generate", "message": "正在进行最后的答案整理..."})
-            
+
             try:
                 conn = resolve_llm_connection()
                 api_cfg = get_api_config()
                 f_model = model_override or conn["model"]
                 f_base = api_base or conn["base"]
                 f_key = api_key or api_cfg.llm_api_key.get_secret_value()
-                
+
                 rescue_llm = build_llm(model=f_model, base_url=f_base, api_key=f_key, streaming=True)
-                
+
                 rescue_msgs = [
                     SystemMessage(content="你是一个总结助手。请直接基于提供的搜索结果回答用户问题。严禁输出任何工具调用代码或废话。"),
-                    HumanMessage(content=f"用户问题：{user_query}\n\n搜索结果：\n{last_tool_output[:5000]}")
+                    HumanMessage(content=f"用户问题：{user_query}\n\n搜索结果：\n{last_tool_output[:5000]}"),
                 ]
-                
+
                 rescue_stream = rescue_llm.astream(rescue_msgs)
                 async for chunk in rescue_stream:
                     text = getattr(chunk, "content", "") or ""
+                    if not isinstance(text, str):
+                        text = str(text)
+                    text = _safe_str(text)
                     if text:
                         answer_text += text
                         yield _sse_event("token", {"text": text})
             except Exception as e:
                 print(f"[SSE] 强制收尾失败: {e}")
+                sys.stdout.flush()
                 answer_text = "（系统提示：由于网络波动，生成最终总结时失败。请尝试重新提问。）"
                 yield _sse_event("token", {"text": answer_text})
 
-        # ============================================================
-        # 正常结束，保存并发送 done 事件
-        # ============================================================
+        # 最终出口二次 sanitize，防止 answer_text 里遗留的坏字符被写进 history / DB
+        answer_text = _safe_str(answer_text)
+
         elapsed_ms = (time.perf_counter() - start) * 1000
         answer = GeneratedAnswer(
-            query=user_query,
+            query=_safe_str(user_query),
             answer=answer_text,
             sources=sources,
             confidence=0.85 if sources else 0.7,
@@ -349,8 +381,16 @@ async def run_stream_sse(
             saved_to_history = True
 
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        # 强化日志：确保 traceback 一定打到 stderr 且立即 flush
+        try:
+            traceback.print_exc(file=sys.stderr)
+        except Exception:
+            pass
+        try:
+            sys.stderr.flush()
+            sys.stdout.flush()
+        except Exception:
+            pass
         yield _sse_event(
             "error",
             {"message": "服务发生内部错误，请稍后重试", "code": type(exc).__name__},
@@ -358,7 +398,7 @@ async def run_stream_sse(
     finally:
         if not saved_to_history:
             content = answer_text + "\n\n*(异常中断)*" if answer_text else "*(生成异常中断)*"
-            history.append({"role": "assistant", "content": content})
+            history.append({"role": "assistant", "content": _safe_str(content)})
             agent._sessions[session_id] = history
             if user_id:
                 get_user_store().set_history(user_id, session_id, history)
