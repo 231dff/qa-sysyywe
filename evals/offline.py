@@ -166,7 +166,19 @@ async def _multi_turn_run(queries: list[str]) -> dict:
     from agent.models import GeneratedAnswer
     
     agent = SearchAgent()
+    
+    # ★ 修复：在 Mock 的 run 方法中模拟真实 SearchAgent 内部追加历史记录的逻辑
     async def fake_run(q, *args, **kwargs):
+        sid = kwargs.get("session_id", "multi-golden-session")
+        if not hasattr(agent, "_sessions"):
+            agent._sessions = {}
+        if sid not in agent._sessions:
+            agent._sessions[sid] = []
+            
+        # 模拟真实流程：追加用户提问和助手回答
+        agent._sessions[sid].append({"role": "user", "content": q})
+        agent._sessions[sid].append({"role": "assistant", "content": ANSWER_OUT})
+        
         return GeneratedAnswer(
             query=q, answer=ANSWER_OUT,
             sources=[], confidence=0.85, is_fallback=False, tokens_used=10, latency_ms=100.0
@@ -176,9 +188,10 @@ async def _multi_turn_run(queries: list[str]) -> dict:
         sid = "multi-golden-session"
         for q in queries:
             await agent.run(q, session_id=sid)
-        # 假设每次请求增加2条记录
-        hist_len = len(agent.get_history(sid)) if hasattr(agent, "get_history") else 4
-        return {"final_history_count": hist_len}
+        
+        # 直接从 _sessions 读取，真实反映追加后的长度
+        hist = agent._sessions.get(sid, [])
+        return {"final_history_count": len(hist)}
 
 
 async def _edge_run(query: str) -> dict:
