@@ -32,12 +32,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
-      - name: 安装依赖
+      - name: 使用 uv 安装依赖 (解决 resolution-too-deep)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install uv
+          # 使用 uv 代替 pip，速度更快且不会因依赖图太复杂而报错
+          uv pip install --system -r requirements.txt
 
       - name: 确定性套件
         # 故意不含 golden_e2e —— 它需要真实后端和 API key
@@ -75,15 +75,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
-      - name: 安装依赖
+      - name: 使用 uv 安装依赖 (解决 resolution-too-deep)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install uv
+          uv pip install --system -r requirements.txt
 
       # 用 docker compose 起后端 + redis
-      # 如果仓库没有 docker-compose.yml，见文末"备选启动方案"
       - name: 启动后端
         env:
           LLM_API_KEY: ${{ secrets.AGENT_API_KEY }}
