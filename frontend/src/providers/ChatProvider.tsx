@@ -19,13 +19,13 @@ export interface SessionSSEState {
   reasoningDuration: number;
   thinkingStartTime: number | null;
   isThinking: boolean;
-  actions: string[]; // ★ 新增
+  actions: string[];
 }
 
 const DEFAULT_SSE_STATE: SessionSSEState = {
   status: "idle", tokens: "", sources: [], meta: null, error: null, progressMessage: null,
   reasoningText: "", reasoningDuration: 0, thinkingStartTime: null, isThinking: false,
-  actions: [], // ★ 新增
+  actions: [],
 };
 
 const getLocalSessions = (): SessionSummary[] => {
@@ -40,6 +40,15 @@ const saveLocalSessions = (data: SessionSummary[]) => {
   if (typeof window === "undefined") return;
   localStorage.setItem(LOCAL_SESSIONS_KEY, JSON.stringify(data));
 };
+
+/** ★ Day 4: 从某会话消息列表末尾倒查最近的 user 消息，作为 query 溯源 */
+function _findLastUserQuery(msgs: ChatMessage[] | undefined): string {
+  if (!msgs || msgs.length === 0) return "";
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "user") return msgs[i].content || "";
+  }
+  return "";
+}
 
 interface ChatContextType {
   messages: ChatMessage[]; 
@@ -305,11 +314,26 @@ export default function ChatProvider({
         doneRef.current[sid] = true;
         setMessagesMap(prev => {
           const msgs = prev[sid] || [];
+          // ★ Day 4: 从消息历史倒查最近的 user query，供 feedback 分析
+          const query = _findLastUserQuery(msgs);
+
           const assistantMsg: ChatMessage = {
             id: `a_${msgCounter.current++}`, role: "assistant",
-            content: sse.tokens, sources: sse.sources, meta: sse.meta || undefined,
+            content: sse.tokens, sources: sse.sources,
+            // ★ Day 4: meta 保留 confidence/latency/tokens 等，并带 trace_id
+            meta: sse.meta ? {
+              confidence: sse.meta.confidence,
+              latency_ms: sse.meta.latency_ms,
+              tokens_used: sse.meta.tokens_used,
+              is_fallback: sse.meta.is_fallback,
+              trace_id: sse.meta.trace_id,
+            } : undefined,
             reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
-            actions: sse.actions, // ★ 传递给消息
+            actions: sse.actions,
+            // ★ Day 4: message_id 来自 done 事件，feedback 的幂等键
+            message_id: sse.meta?.message_id,
+            // ★ Day 4: 关联的 user query
+            query,
           };
           return { ...prev, [sid]: [...msgs, assistantMsg] };
         });
@@ -322,11 +346,13 @@ export default function ChatProvider({
         if (sse.tokens || sse.reasoningText) {
           setMessagesMap(prev => {
             const msgs = prev[sid] || [];
+            const query = _findLastUserQuery(msgs);  // ★ Day 4
             const abortedMsg: ChatMessage = {
               id: `a_${msgCounter.current++}`, role: "assistant",
               content: sse.tokens + "\n\n*(已停止生成)*",
               reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
-              actions: sse.actions, // ★ 传递给消息
+              actions: sse.actions,
+              query,  // ★ Day 4
             };
             return { ...prev, [sid]: [...msgs, abortedMsg] };
           });
@@ -335,11 +361,16 @@ export default function ChatProvider({
       } else if (sse.status === "error" && !doneRef.current[sid]) {
         doneRef.current[sid] = true;
         if (sid === sessionId) {
-          const errorMsg: ChatMessage = { 
-            id: `e_${msgCounter.current++}`, role: "assistant", 
-            content: `⚠️ **系统提示**\n\n${sse.error}` 
-          };
-          setMessagesMap(prev => ({ ...prev, [sid]: [...(prev[sid] || []), errorMsg] }));
+          setMessagesMap(prev => {
+            const msgs = prev[sid] || [];
+            const query = _findLastUserQuery(msgs);  // ★ Day 4
+            const errorMsg: ChatMessage = { 
+              id: `e_${msgCounter.current++}`, role: "assistant", 
+              content: `⚠️ **系统提示**\n\n${sse.error}`,
+              query,  // ★ Day 4
+            };
+            return { ...prev, [sid]: [...msgs, errorMsg] };
+          });
         }
         setSseStateMap(prev => ({ ...prev, [sid]: DEFAULT_SSE_STATE }));
       } else if (sse.status === "idle" || sse.status === "connecting" || sse.status === "streaming") {
@@ -386,7 +417,7 @@ function handleSSEEvent(
             progressMessage: data.message, 
             isThinking: true,
             thinkingStartTime: startTime,
-            actions: [...state.actions, data.message] // ★ 存入 actions 而不是污染 reasoningText
+            actions: [...state.actions, data.message]
           } 
         };
       }

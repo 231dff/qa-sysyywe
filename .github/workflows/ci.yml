@@ -1,11 +1,14 @@
 # ============================================================
 # 智能搜索助手 — CI 门禁
 #
-# 两道门禁：
-# 1. backend-evals: 跑统一评测入口（6 套件 + 门禁）+ 覆盖率报告
-# 2. frontend-checks: 类型检查 + ESLint（Next.js 16 + React 19）
+# 三套检查：
+# 1. quick-checks: 5 个确定性套件（offline/fault/security/quality/memory）
+#                  不依赖后端、不消耗 API，每次 push/PR 必跑（1~2 分钟）
+# 2. e2e-gate:     启动后端 + 跑 golden_e2e + gate 对比基线
+#                  消耗 API，main 必跑 + PR 打 label 'e2e' 触发（~10 分钟）
+# 3. frontend-checks: 类型检查 + ESLint
 #
-# 触发：push 到 main / feat 分支，以及所有 PR
+# 触发：push 到 main / feat 分支、所有 PR、手动 workflow_dispatch
 # ============================================================
 name: CI
 
@@ -13,14 +16,15 @@ on:
   push:
     branches: [main, "feat/**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  backend-evals:
-    name: 后端评测 + 覆盖率
+  # ============================================================
+  # Job 1: 快速确定性检查（无后端、无 API 依赖）
+  # ============================================================
+  quick-checks:
+    name: 快速确定性检查（5 套件 + 覆盖率）
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v4
 
@@ -35,17 +39,105 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 统一评测入口：离线回归(pytest) + 故障注入 + 安全审计 + 在线监控 + 检索质量 + 记忆
-      # 退出码非 0 即门禁失败；judge/probe 默认跳过（离线可跑）
-      - name: 运行企业级评测（门禁）
-        run: python -m evals
+      - name: 确定性套件
+        # 故意不含 golden_e2e —— 它需要真实后端和 API key
+        # 故意不含 online_monitoring --probe —— 它需要真实后端
+        run: |
+          python -m evals \
+            --kind offline_regression \
+            --kind fault_injection \
+            --kind security_audit \
+            --kind quality \
+            --kind memory \
+            --no-color
 
-      # 覆盖率：统计核心源码，阈值 70%（当前约 73%），防质量回退
       - name: 覆盖率报告
         run: |
           python -m pytest --cov=agent --cov=rag --cov=memory --cov=tools --cov=utils --cov=config \
             --cov-report=term-missing --cov-fail-under=70
 
+  # ============================================================
+  # Job 2: E2E + 门禁（需要启动后端 + API key）
+  # ============================================================
+  e2e-gate:
+    name: E2E 评测 + 门禁对比
+    runs-on: ubuntu-latest
+    needs: quick-checks
+    # 触发条件：主分支 push / PR 带 e2e label / 手动触发
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e')) ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 用 docker compose 起后端 + redis
+      # 如果仓库没有 docker-compose.yml，见文末"备选启动方案"
+      - name: 启动后端
+        env:
+          LLM_API_KEY: ${{ secrets.AGENT_API_KEY }}
+          LLM_API_BASE: ${{ secrets.AGENT_API_BASE }}
+          LLM_MODEL: qwen-turbo
+          SESSION_BACKEND: redis
+        run: |
+          docker compose up -d backend redis
+          # 等后端就绪（最多 90 秒）
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/api/health >/dev/null; then
+              echo "backend ready after ${i}x3s"
+              break
+            fi
+            sleep 3
+          done
+          curl -sf http://127.0.0.1:8000/api/health || (docker compose logs backend && exit 1)
+
+      - name: 跑黄金集 E2E
+        env:
+          EVAL_BACKEND_URL: http://127.0.0.1:8000
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+          AGENT_API_BASE: ${{ secrets.AGENT_API_BASE }}
+          AGENT_MODEL: qwen-turbo
+          JUDGE_API_KEY: ${{ secrets.JUDGE_API_KEY }}
+          JUDGE_BASE_URL: ${{ secrets.JUDGE_BASE_URL }}
+          JUDGE_MODEL: qwen-max
+          EVAL_CONCURRENCY: "3"
+        run: python -m evals --kind golden_e2e --concurrency 3
+
+      - name: 门禁对比基线
+        run: |
+          python -m evals.gate \
+            --no-color \
+            --output-json evals/reports/gate_result.json
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports-${{ github.run_id }}
+          path: |
+            evals/reports/eval_report.csv
+            evals/reports/gate_result.json
+            evals/reports/baseline/baseline_report.csv
+          retention-days: 14
+
+      - name: 清理
+        if: always()
+        run: docker compose down -v
+
+  # ============================================================
+  # Job 3: 前端检查（保持原样）
+  # ============================================================
   frontend-checks:
     name: 前端类型检查 + Lint
     runs-on: ubuntu-latest

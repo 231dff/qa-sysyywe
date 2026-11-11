@@ -35,6 +35,11 @@ export interface DoneEvent {
   latency_ms: number;
   tokens_used: number;
   is_fallback: boolean;
+  // ★ Day 4: 后端在 done 事件中补的反馈关联字段
+  message_id?: string;
+  session_id?: string;
+  trace_id?: string;
+  cached?: boolean;
 }
 
 export interface ErrorEvent { message: string; code: string; }
@@ -59,12 +64,18 @@ export interface ChatMessage {
     latency_ms: number;
     tokens_used: number;
     is_fallback: boolean;
+    // ★ Day 4: done 事件带回来的 trace_id，供 feedback 使用
+    trace_id?: string;
   };
   reasoningText?: string;
   reasoningDuration?: number;
   isThinking?: boolean;
   progressMessage?: string | null;
-  actions?: string[]; // ★ 新增：动作列表
+  actions?: string[]; // 动作列表
+  // ★ Day 4: 反馈相关
+  message_id?: string;              // done 事件写入，feedback 的幂等键
+  feedback?: "up" | "down";         // 已提交的反馈，刷新恢复状态用
+  query?: string;                   // 对应的 user query，feedback 分析用
 }
 
 export interface SessionInfo {

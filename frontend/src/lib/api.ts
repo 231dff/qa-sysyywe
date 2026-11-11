@@ -60,7 +60,6 @@ export function getOrCreateUserId(): string {
   try {
     let id = window.localStorage.getItem(USER_ID_KEY);
     if (!id) {
-      // 兼容非 HTTPS 环境（crypto.randomUUID 在 http://qa.local 可能不可用）
       if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
         id = `u_${crypto.randomUUID()}`;
       } else {
@@ -72,4 +71,50 @@ export function getOrCreateUserId(): string {
   } catch {
     return "";
   }
+}
+
+// ============================================================
+// ★ Day 4: 反馈 API
+// ============================================================
+export interface FeedbackPayload {
+  session_id: string;
+  message_id: string;
+  feedback: "up" | "down";
+  comment?: string;
+  query?: string;
+  answer_preview?: string;
+  trace_id?: string;
+  user_id?: string;
+}
+
+export interface FeedbackItem {
+  feedback_id: string;
+  session_id: string;
+  message_id: string;
+  feedback: "up" | "down";
+  comment: string;
+  query: string;
+  answer_preview: string;
+  trace_id: string;
+  user_id: string;
+  ts: number;
+}
+
+/** POST /api/feedback — 提交 👍/👎 */
+export async function submitFeedback(payload: FeedbackPayload): Promise<{ ok: boolean; feedback_id: string }> {
+  const res = await fetch(`${BASE}/api/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`提交反馈失败: ${res.status}`);
+  return res.json();
+}
+
+/** GET /api/feedback/session/:id — 查询会话内已提交的反馈（刷新后恢复状态） */
+export async function getFeedbackBySession(sessionId: string): Promise<FeedbackItem[]> {
+  const res = await fetch(`${BASE}/api/feedback/session/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.items ?? []) as FeedbackItem[];
 }

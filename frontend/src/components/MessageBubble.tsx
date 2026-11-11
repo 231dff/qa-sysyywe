@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types";
 import ReactECharts from "echarts-for-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { submitFeedback } from "../lib/api";
 
 function CodeBlock({ language, code, ...props }: { language: string; code: string; [key: string]: any }) {
   const [isCopied, setIsCopied] = useState(false);
@@ -49,19 +50,76 @@ function CodeBlock({ language, code, ...props }: { language: string; code: strin
 export default function MessageBubble({
   msg,
   isStreaming,
+  sessionId,
 }: {
   msg: ChatMessage;
   isStreaming: boolean;
+  sessionId?: string;  // ★ Day 4: 从 ChatWindow 传入
 }) {
   const isUser = msg.role === "user";
   const [isExpanded, setIsExpanded] = useState<boolean>(msg.isThinking || false);
   const reasoningRef = useRef<HTMLDivElement>(null);
   const hasAutoFolded = useRef(false);
 
+  // ★ Day 4: 稳定的 message_id
+  // - 优先用 msg.message_id（ChatWindow 从 done 事件写入，刷新可恢复）
+  // - 否则用组件生命周期内稳定的 uuid（不刷新就 OK）
+  const fallbackId = useMemo(() => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `m_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }, []);
+  const messageId: string = (msg as any).message_id || (msg as any).id || fallbackId;
+
+  // ★ Day 4: 反馈状态
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // 从现有已提交反馈恢复（如果 ChatWindow 传了 feedback 状态可以覆盖）
+  useEffect(() => {
+    const existing = (msg as any).feedback as ("up" | "down" | undefined);
+    if (existing) setFeedback(existing);
+  }, [msg]);
+
+  const handleFeedback = async (kind: "up" | "down") => {
+    if (submitting) return;
+    if (!sessionId) {
+      console.warn("[feedback] 缺少 sessionId，无法提交");
+      return;
+    }
+    const previous = feedback;
+    setFeedback(kind);            // 乐观 UI
+    setSubmitting(true);
+    try {
+      const res = await submitFeedback({
+        session_id: sessionId,
+        message_id: messageId,
+        feedback: kind,
+        query: (msg as any).query || "",
+        answer_preview: (msg.content || "").slice(0, 200),
+        trace_id: (msg.meta as any)?.trace_id || "",
+        user_id: (() => {
+          try {
+            return window.localStorage.getItem("search_agent_user_id") || "";
+          } catch {
+            return "";
+          }
+        })(),
+      });
+      if (!res?.ok) throw new Error("提交失败");
+    } catch (e) {
+      console.error("[feedback] 提交失败", e);
+      setFeedback(previous);      // 回滚
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   useEffect(() => {
     if (msg.isThinking) {
       setIsExpanded(true);
-      hasAutoFolded.current = false; 
+      hasAutoFolded.current = false;
     } else if (!msg.isThinking && !hasAutoFolded.current) {
       setIsExpanded(false);
       hasAutoFolded.current = true;
@@ -113,7 +171,6 @@ export default function MessageBubble({
         ) : (
           <div className="w-full text-[#1a1a1a] dark:text-[#e0e0e0] text-[16px] leading-[1.9]">
             
-            {/* 思考过程区块 */}
             {showThinking && (
               <div className="mb-5 flex flex-col gap-2">
                 <button
@@ -147,7 +204,6 @@ export default function MessageBubble({
                       ref={reasoningRef}
                       className="pl-6 pr-4 text-[15px] text-gray-500 dark:text-gray-400 leading-[1.8] max-h-[400px] overflow-y-auto custom-scrollbar scroll-smooth"
                     >
-                      {/* ★ 分离展示：动作列表 */}
                       {msg.actions && msg.actions.length > 0 && (
                         <div className="mb-4 space-y-2">
                           {msg.actions.map((action, idx) => (
@@ -159,7 +215,6 @@ export default function MessageBubble({
                         </div>
                       )}
 
-                      {/* ★ 分离展示：真正的推演过程 */}
                       <div className="prose prose-sm dark:prose-invert max-w-none 
                         prose-p:text-[15px] prose-p:my-1.5 prose-p:leading-[1.8]
                         prose-ul:text-[15px] prose-ul:my-1.5 prose-ul:pl-4
@@ -180,7 +235,6 @@ export default function MessageBubble({
               </div>
             )}
 
-            {/* 正式回答内容（流式提速 + Markdown） */}
             {cleanText && (
               <div className="prose prose-sm dark:prose-invert max-w-none 
                 prose-p:text-[16px] prose-p:my-2 prose-p:leading-[1.9]
@@ -218,7 +272,6 @@ export default function MessageBubble({
               </div>
             )}
 
-            {/* 渲染图表 */}
             {charts.length > 0 && !isStreaming && (
               <div className="mt-4 flex flex-col gap-4 w-full">
                 {charts.map((config, idx) => (
@@ -235,9 +288,9 @@ export default function MessageBubble({
           </div>
         )}
 
-        {/* 来源与 Meta 信息 */}
+        {/* 来源与 Meta 信息 + 反馈按钮 */}
         {!isUser && !isStreaming && (
-          <div className="mt-3 flex flex-col gap-2">
+          <div className="mt-3 flex flex-col gap-2 w-full">
             {msg.sources && msg.sources.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {msg.sources.map((s, idx) => (
@@ -249,15 +302,51 @@ export default function MessageBubble({
               </div>
             )}
             
-            {msg.meta && (
-              <div className="text-[13px] text-gray-400 dark:text-gray-500 flex items-center gap-3">
-                <span>置信度 {Math.round(msg.meta.confidence * 100)}%</span>
-                <span>·</span>
-                <span>耗时 {msg.meta.latency_ms.toFixed(0)}ms</span>
-                <span>·</span>
-                <span>{msg.meta.tokens_used} tokens</span>
+            <div className="flex items-center justify-between gap-3">
+              {msg.meta && (
+                <div className="text-[13px] text-gray-400 dark:text-gray-500 flex items-center gap-3">
+                  <span>置信度 {Math.round(msg.meta.confidence * 100)}%</span>
+                  <span>·</span>
+                  <span>耗时 {msg.meta.latency_ms.toFixed(0)}ms</span>
+                  <span>·</span>
+                  <span>{msg.meta.tokens_used} tokens</span>
+                </div>
+              )}
+
+              {/* ★ Day 4: 👍 / 👎 */}
+              <div className="flex items-center gap-1 ml-auto">
+                <button
+                  onClick={() => handleFeedback("up")}
+                  disabled={submitting}
+                  title="有帮助"
+                  aria-label="有帮助"
+                  className={`p-1.5 rounded-md transition-colors ${
+                    feedback === "up"
+                      ? "bg-green-100 dark:bg-green-900/40 text-green-600 dark:text-green-400"
+                      : "text-gray-400 hover:text-green-600 dark:hover:text-green-400 hover:bg-gray-100 dark:hover:bg-[#333]"
+                  } ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill={feedback === "up" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"/>
+                  </svg>
+                </button>
+                <button
+                  onClick={() => handleFeedback("down")}
+                  disabled={submitting}
+                  title="没帮助"
+                  aria-label="没帮助"
+                  className={`p-1.5 rounded-md transition-colors ${
+                    feedback === "down"
+                      ? "bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400"
+                      : "text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-[#333]"
+                  } ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill={feedback === "down" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"/>
+                  </svg>
+                </button>
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>

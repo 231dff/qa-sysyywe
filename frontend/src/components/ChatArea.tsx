@@ -32,7 +32,7 @@ export default function ChatArea({ onOpenSidebar }: { onOpenSidebar: () => void 
         reasoningDuration: sse.reasoningDuration,
         isThinking: sse.isThinking,
         progressMessage: sse.progressMessage,
-        actions: sse.actions, // ★ 传递 actions
+        actions: sse.actions,
       }
     : null;
 
@@ -92,7 +92,12 @@ export default function ChatArea({ onOpenSidebar }: { onOpenSidebar: () => void 
           ) : (
             <>
               {displayMessages.map((msg) => (
-                <MessageBubble key={msg.id} msg={msg} isStreaming={msg.id === "streaming" && isCurrentSessionBusy} />
+                <MessageBubble 
+                  key={msg.id} 
+                  msg={msg} 
+                  isStreaming={msg.id === "streaming" && isCurrentSessionBusy} 
+                  sessionId={sessionId}  // ★ Day 4: 传给 MessageBubble 用于 feedback
+                />
               ))}
               <div ref={bottomRef} className="h-4" />
             </>

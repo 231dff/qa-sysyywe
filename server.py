@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import uuid  # ★ Day 4
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +75,7 @@ from memory.session_store import get_session_store
 from memory.user_store import get_user_store
 from memory.memory_manager import get_memory_manager
 from memory.tdai_adapter import get_tdai_adapter
+from memory.feedback_store import get_feedback_store  # ★ Day 4
 from utils.helpers import generate_session_id
 from utils.http_client import set_shared_client, reset_shared_client
 from utils.metrics import (
@@ -87,7 +89,7 @@ import httpx
 app = FastAPI(
     title="智能搜索助手 API",
     description="实时联网搜索 Agent 的 FastAPI 后端服务（兼容自定义配置）",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 FastAPIInstrumentor.instrument_app(app)
@@ -204,6 +206,13 @@ async def startup():
     except Exception as e:
         print(f"[Startup] Agent 预热失败（不影响启动，首个请求会重试）: {e}")
 
+    try:
+        fs = get_feedback_store()
+        backend = "Redis" if fs._redis else "Memory"
+        print(f"[Startup] FeedbackStore 已初始化 (backend={backend})")
+    except Exception as e:
+        print(f"[Startup] FeedbackStore 初始化失败: {e}")
+
     _cleanup_task = asyncio.create_task(_session_cleanup_loop())
     print(f"[SessionCleanup] 后台清理任务已启动，间隔 {_SESSION_CLEANUP_INTERVAL}s")
 
@@ -240,11 +249,10 @@ class ChatRequest(BaseModel):
 
     provider: Optional[str] = Field(None, description="Provider ID")
     model: Optional[str] = Field(None, description="模型 ID")
-    
-    # ★ 核心兼容：接收前端自定义配置
+
     api_base: Optional[str] = Field(None, description="自定义 API Base URL")
     api_key: Optional[str] = Field(None, description="自定义 API Key")
-    
+
     mcp_config: Optional[dict] = Field(None, description="自定义 MCP 配置")
     enable_deep_think: Optional[bool] = Field(True, description="是否开启深度思考")
     enable_search: Optional[bool] = Field(True, description="是否开启联网搜索")
@@ -257,10 +265,12 @@ class ChatRequest(BaseModel):
     search_depth: Optional[str] = Field(None, description="搜索深度 (basic | advanced)")
     top_k: Optional[int] = Field(None, ge=2, le=10, description="保留 Top-K 片段")
 
+
 class SessionInfo(BaseModel):
     session_id: str
     history: list[dict]
     active: bool
+
 
 class ConfigDefaults(BaseModel):
     default_provider: Optional[str] = None
@@ -268,9 +278,21 @@ class ConfigDefaults(BaseModel):
     search_depth: str
     top_k: int
 
+
 class HealthResponse(BaseModel):
     status: str
     active_sessions: int
+
+
+class FeedbackRequest(BaseModel):  # ★ Day 4
+    session_id: str = Field(..., description="会话 ID")
+    message_id: str = Field(..., description="消息 ID（来自 done 事件）")
+    feedback: str = Field(..., description="'up' | 'down'")
+    comment: Optional[str] = Field(None, description="可选补充说明")
+    query: Optional[str] = Field(None, description="用户问题（便于 Bad Case 分析）")
+    answer_preview: Optional[str] = Field(None, description="回答片段（便于 Bad Case 分析）")
+    trace_id: Optional[str] = Field(None, description="Langfuse trace_id")
+    user_id: Optional[str] = Field(None, description="用户 ID")
 
 # ============================================================
 # Provider CRUD
@@ -339,16 +361,26 @@ async def chat_stream(req: ChatRequest, request: Request):
     span = trace.get_current_span()
     base_tags = ["qa-sysyywe", "chat-stream"]
 
+    # ★ Day 4: 生成 message_id / trace_id，供 done 事件与 feedback 使用
+    message_id = uuid.uuid4().hex[:16]
+    trace_id = ""
+    if span.is_recording():
+        try:
+            trace_id = format(span.get_span_context().trace_id, "032x")
+        except Exception:
+            trace_id = ""
+
     if span.is_recording():
         if req.user_id:
             span.set_attribute("langfuse.user.id", req.user_id)
         span.set_attribute("langfuse.session.id", req.session_id or "auto-generated")
         span.set_attribute("langfuse.tags", base_tags)
+        if message_id:
+            span.set_attribute("langfuse.metadata.message_id", message_id)
 
     agent = get_agent()
     sid = req.session_id or generate_session_id()
 
-    # ★ 核心兼容逻辑：如果前端传了 api_key，优先使用前端配置；否则查 providers.yaml
     try:
         if req.api_key and req.api_base:
             llm_conn = {
@@ -361,7 +393,6 @@ async def chat_stream(req: ChatRequest, request: Request):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    # 降级连接兼容
     fallback_conn = None
     if req.fallback_api_key and req.fallback_api_base:
         fallback_conn = {
@@ -386,10 +417,8 @@ async def chat_stream(req: ChatRequest, request: Request):
         full_answer = ""
         collected_sources: list[dict] = []
 
-        # 1. 判断是否新会话
         is_new_turn = len(agent.get_history(sid)) == 0
 
-        # 2. 语义缓存查询
         if is_new_turn:
             cache = get_semantic_cache()
             cached = cache.get(req.query, user_id=req.user_id)
@@ -407,14 +436,15 @@ async def chat_stream(req: ChatRequest, request: Request):
 
                 cache_latency_ms = round((time.perf_counter() - cache_start) * 1000, 2)
                 yield _sse_event("sources", {"sources": cached_sources or []}).encode("utf-8")
+                # ★ Day 4: done 事件补 message_id / session_id / trace_id
                 yield _sse_event("done", {
                     "confidence": 1.0, "latency_ms": cache_latency_ms,
                     "tokens_used": 0, "is_fallback": False, "cached": True,
+                    "message_id": message_id, "session_id": sid, "trace_id": trace_id,
                 }).encode("utf-8")
                 record_sse_stream("completed")
                 return
 
-        # 3. 正常 Agent 流程
         async for sse_data in run_stream_sse(
             agent=agent,
             user_query=req.query,
@@ -450,6 +480,16 @@ async def chat_stream(req: ChatRequest, request: Request):
                 try:
                     full_answer = json.loads(sse_data.split("data: ")[1].strip()).get("text", "")
                     has_revised = True
+                except Exception:
+                    pass
+            elif sse_data.startswith("event: done"):
+                # ★ Day 4: 拦截 done，补 message_id / session_id / trace_id
+                try:
+                    payload = json.loads(sse_data.split("data: ", 1)[1].strip())
+                    payload["message_id"] = message_id
+                    payload["session_id"] = sid
+                    payload["trace_id"] = trace_id
+                    sse_data = _sse_event("done", payload)
                 except Exception:
                     pass
             elif '"is_fallback": true' in sse_data or '"is_fallback":true' in sse_data:
@@ -490,6 +530,42 @@ async def chat_stream(req: ChatRequest, request: Request):
 def _sse_event(event: str, data: dict) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
+
+# ============================================================
+# 反馈端点 ★ Day 4
+# ============================================================
+@app.post("/api/feedback")
+async def submit_feedback(body: FeedbackRequest):
+    if body.feedback not in ("up", "down"):
+        raise HTTPException(400, "feedback 必须是 'up' 或 'down'")
+    store = get_feedback_store()
+    entry = store.add(
+        session_id=body.session_id,
+        message_id=body.message_id,
+        feedback=body.feedback,
+        comment=body.comment or "",
+        query=body.query or "",
+        answer_preview=body.answer_preview or "",
+        trace_id=body.trace_id or "",
+        user_id=body.user_id or "",
+    )
+    return {"ok": True, "feedback_id": entry.feedback_id, "message_id": entry.message_id}
+
+
+@app.get("/api/feedback/session/{session_id}")
+async def list_feedback_by_session(session_id: str):
+    store = get_feedback_store()
+    return {
+        "session_id": session_id,
+        "items": [e.to_dict() for e in store.list_by_session(session_id)],
+    }
+
+
+@app.get("/api/feedback/recent")
+async def list_feedback_recent(limit: int = 100, only_bad: bool = False):
+    store = get_feedback_store()
+    items = store.list_bad_cases(limit=limit) if only_bad else store.list_recent(limit=limit)
+    return {"items": [e.to_dict() for e in items], "count": len(items)}
 
 # ============================================================
 # 会话管理端点
