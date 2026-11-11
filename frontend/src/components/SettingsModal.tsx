@@ -18,13 +18,20 @@ export default function SettingsModal({ open, onClose }: { open: boolean; onClos
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setProvider(parsed.provider || "");
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setApiBase(parsed.apiBase || "");
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setApiKey(parsed.apiKey || "");
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setModel(parsed.model || "");
-        } catch (e) {}
+        } catch {
+          // 忽略解析错误
+        }
       }
       const savedMcp = localStorage.getItem("custom_mcp_config");
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (savedMcp) setMcpConfig(savedMcp);
     }
   }, [open]);

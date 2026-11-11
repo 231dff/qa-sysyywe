@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types";
@@ -9,7 +9,6 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { submitFeedback } from "../lib/api";
 
-// ★ 修复：替换 any 为具体的类型
 function CodeBlock({ language, code, ...props }: { language: string; code: string; [key: string]: unknown }) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = async () => {
@@ -18,7 +17,7 @@ function CodeBlock({ language, code, ...props }: { language: string; code: strin
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2000);
     } catch {
-      // ★ 修复：去掉未使用的 err 变量
+      // ignore
     }
   };
   const handleDownload = () => {
@@ -64,23 +63,25 @@ export default function MessageBubble({
   const reasoningRef = useRef<HTMLDivElement>(null);
   const hasAutoFolded = useRef(false);
 
-  const fallbackId = useMemo(() => {
+  // ★ 修复：将不纯的 Date.now 移入 useState 惰性初始化中
+  const [fallbackId] = useState(() => {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return crypto.randomUUID();
     }
     return `m_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  }, []);
+  });
   
-  // ★ 修复：移除 as any
   const messageId: string = msg.message_id || msg.id || fallbackId;
 
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    // ★ 修复：移除 as any
     const existing = msg.feedback;
-    if (existing) setFeedback(existing);
+    if (existing) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFeedback(existing);
+    }
   }, [msg]);
 
   const handleFeedback = async (kind: "up" | "down") => {
@@ -97,9 +98,9 @@ export default function MessageBubble({
         session_id: sessionId,
         message_id: messageId,
         feedback: kind,
-        query: msg.query || "", // ★ 修复：移除 as any
+        query: msg.query || "",
         answer_preview: (msg.content || "").slice(0, 200),
-        trace_id: msg.meta?.trace_id || "", // ★ 修复：移除 as any
+        trace_id: msg.meta?.trace_id || "",
         user_id: (() => {
           try {
             return window.localStorage.getItem("search_agent_user_id") || "";
@@ -119,9 +120,11 @@ export default function MessageBubble({
 
   useEffect(() => {
     if (msg.isThinking) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsExpanded(true);
       hasAutoFolded.current = false;
     } else if (!msg.isThinking && !hasAutoFolded.current) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsExpanded(false);
       hasAutoFolded.current = true;
     }
@@ -135,7 +138,7 @@ export default function MessageBubble({
 
   const parseContent = (text: string) => {
     let cleanText = text;
-    const charts: Record<string, unknown>[] = []; // ★ 修复：any[] 改为 Record<string, unknown>[]
+    const charts: Record<string, unknown>[] = [];
     const artifactRegex = /<artifact>([\s\S]*?)<\/artifact>/g;
     const matches = [...text.matchAll(artifactRegex)];
 
@@ -145,7 +148,6 @@ export default function MessageBubble({
         charts.push(chartConfig);
         cleanText = cleanText.replace(match[0], "");
       } catch {
-        // ★ 修复：去掉未使用的 e
         cleanText = cleanText.replace(match[0], "\n*(图表配置解析失败)*\n");
       }
     });
@@ -255,8 +257,7 @@ export default function MessageBubble({
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      // ★ 修复：替换 any 为具体的类型
-                      code({ inline, className, children, node: _node, ...props }: React.HTMLAttributes<HTMLElement> & { inline?: boolean; node?: unknown }) {
+                      code({ inline, className, children, ...props }: React.HTMLAttributes<HTMLElement> & { inline?: boolean }) {
                         const match = /language-(\w+)/.exec(className || '');
                         const codeString = String(children).replace(/\n$/, '');
                         return !inline && match ? (
@@ -291,7 +292,6 @@ export default function MessageBubble({
           </div>
         )}
 
-        {/* 来源与 Meta 信息 + 反馈按钮 */}
         {!isUser && !isStreaming && (
           <div className="mt-3 flex flex-col gap-2 w-full">
             {msg.sources && msg.sources.length > 0 && (

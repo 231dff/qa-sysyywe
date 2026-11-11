@@ -110,10 +110,13 @@ export default function ChatProvider({
   );
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUserId(getOrCreateUserId());
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSessions(getLocalSessions());
     const savedTheme = localStorage.getItem(THEME_KEY) as "light" | "dark" | null;
     const initialTheme = savedTheme || "light";
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTheme(initialTheme);
     if (initialTheme === "dark") {
       document.documentElement.classList.add("dark");
@@ -151,7 +154,7 @@ export default function ChatProvider({
             id: `h_${i}`, role: m.role as "user" | "assistant", content: m.content,
           }));
           setMessagesMap(prev => ({ ...prev, [sid]: history }));
-        } catch { // ✅ 修复：去掉了 e: any
+        } catch { 
           setMessagesMap(prev => ({ ...prev, [sid]: [] }));
         } finally {
           setSessionsLoading(false);
@@ -218,7 +221,6 @@ export default function ChatProvider({
         [sid]: { ...DEFAULT_SSE_STATE, status: "connecting", progressMessage: "正在思考如何回答...", isThinking: true, thinkingStartTime: Date.now() }
       }));
 
-      // ✅ 修复：将 any 替换为 Record<string, unknown>
       let customConfig: Record<string, unknown> = {};
       let customMcp: Record<string, unknown> = {};
       try {
@@ -234,7 +236,6 @@ export default function ChatProvider({
         provider: (customConfig.provider as string) || "qwen", 
         api_base: (customConfig.apiBase as string) || undefined,
         api_key: (customConfig.apiKey as string) || undefined,
-        // ✅ 修复：mcp_config 的类型强转
         mcp_config: Object.keys(customMcp).length > 0 ? (customMcp as Record<string, unknown>) : undefined,
         search_depth: settings.searchDepth, top_k: settings.topK,
         enable_deep_think: options?.deepThink ?? false,
@@ -290,7 +291,7 @@ export default function ChatProvider({
         }
 
         setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "done" } }));
-      } catch (err: unknown) { // ✅ 修复：err: any -> err: unknown
+      } catch (err: unknown) { 
         const error = err as Error;
         if (error.name === "AbortError") {
           setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "aborted" } }));
@@ -392,7 +393,6 @@ export default function ChatProvider({
   );
 }
 
-// ✅ 修复：将 data: any 改为 data: Record<string, unknown>
 function handleSSEEvent(
   sid: string, eventType: string, data: Record<string, unknown>, 
   setSseStateMap: React.Dispatch<React.SetStateAction<Record<string, SessionSSEState>>>
@@ -403,7 +403,7 @@ function handleSSEEvent(
       case "progress": {
         const now = Date.now();
         const startTime = state.thinkingStartTime || now;
-        const msg = data.message as string; // 强转
+        const msg = data.message as string; 
         
         if (msg.includes("正在思考如何回答")) {
            return { ...prev, [sid]: { ...state, progressMessage: msg, isThinking: true, thinkingStartTime: startTime } };

@@ -175,6 +175,8 @@ class APIConfig(BaseSettings):
     llm_temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     tavily_api_key: SecretStr = Field(default=SecretStr("tvly-your-api-key"))
     tavily_api_base: str = Field(default="https://api.tavily.com")
+    # ★ 修复 fault_injection 报错：补齐缺失属性
+    supports_response_format: bool = Field(default=False)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
