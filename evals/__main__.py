@@ -4,11 +4,8 @@
 用法:
     python -m evals                                # 跑全部套件
     python -m evals --kind offline_regression      # 单跑离线回归
-    python -m evals --kind golden_e2e              # 单跑黄金集 E2E
-    python -m evals --kind golden_e2e --only-ids test_001,test_002 --concurrency 2
+    python -m evals --kind offline_regression --kind fault_injection # 跑多个
     python -m evals --list                         # 列出已注册套件
-    python -m evals -o report.json                 # 指定报告路径
-    python -m evals --html                         # 额外输出 HTML
 """
 from __future__ import annotations
 
@@ -67,16 +64,20 @@ def _print_console(report: core.Report) -> None:
 
 async def _main() -> int:
     ap = argparse.ArgumentParser(description="企业级评测统一入口")
-    ap.add_argument("--kind", choices=[
+    
+    # ✅ 修复：添加 action="append"，支持传入多个 --kind
+    ap.add_argument("--kind", action="append", choices=[
         core.KIND_OFFLINE, core.KIND_ONLINE, core.KIND_FAULT,
         core.KIND_SECURITY, core.KIND_QUALITY, core.KIND_MEMORY,
         core.KIND_GOLDEN_E2E,
-    ], default=None, help="仅运行指定类型的套件")
+    ], default=None, help="仅运行指定类型的套件（可多次传入，如 --kind a --kind b）")
+    
     ap.add_argument("--probe", action="store_true", help="在线监控：探测运行中的后端")
     ap.add_argument("--judge", action="store_true", help="检索质量：启用 LLM-as-judge")
     ap.add_argument("--list", action="store_true", help="列出已注册套件")
     ap.add_argument("-o", "--output", default=None, help="JSON 报告输出路径")
     ap.add_argument("--html", action="store_true", help="额外输出 HTML 报告")
+    
     # golden_e2e 专用
     ap.add_argument("--only-ids", default=None,
                     help="仅跑指定 id，逗号分隔（例: test_001,test_002）")
@@ -84,6 +85,7 @@ async def _main() -> int:
                     help="golden_e2e 并发数")
     ap.add_argument("--dataset", default=None,
                     help="golden_e2e 数据集路径")
+    
     args = ap.parse_args()
 
     if args.list:
@@ -114,8 +116,8 @@ async def _main() -> int:
             if args.dataset:
                 suite.dataset_path = Path(args.dataset)
 
-    kinds = [args.kind] if args.kind else None
-    report = await core.run_suites(kinds)
+    # ✅ 修复：这里直接传 args.kind (它已经是列表了)
+    report = await core.run_suites(args.kind)
 
     _print_console(report)
 
