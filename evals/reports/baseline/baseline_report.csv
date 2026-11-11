@@ -1,3 +1,54 @@
 id,type,passed,veto,fact_score,grounded_score,citation_score,error,latency_ms,reason
-test_001,factual,True,False,4,4,4,,5518,
-test_002,factual,True,False,4,4,3,,11484,
+test_001,factual,True,False,4,4,4,,17687,
+test_002,factual,True,False,4,3,4,,17141,
+test_003,factual,True,False,4,4,4,,18066,
+test_004,factual,True,False,4,4,4,,10503,
+test_005,factual,True,False,4,4,4,,7448,
+test_006,factual,True,False,4,4,3,,9492,
+test_007,factual,True,False,4,4,4,,11702,
+test_008,factual,False,True,1,1,4,,18229,see assertions
+test_009,factual,False,True,1,2,3,,20091,see assertions
+test_010,factual,True,False,4,4,3,,11069,
+test_011,factual,False,True,1,2,3,,7548,see assertions
+test_012,factual,False,True,1,2,3,,7477,see assertions
+test_013,factual,False,False,4,3,2,,9233,see assertions
+test_014,factual,True,False,4,4,4,,6874,
+test_015,factual,True,False,4,4,4,,6530,
+test_016,factual,True,False,4,4,4,,11342,
+test_017,factual,True,False,4,4,4,,14776,
+test_018,factual,True,False,4,4,4,,12889,
+test_019,factual,True,False,4,4,4,,7689,
+test_020,factual,True,False,4,4,3,,9002,
+test_021,multi_hop,True,False,3,4,4,,7815,
+test_022,multi_hop,False,False,4,4,2,,11502,see assertions
+test_023,multi_hop,True,False,4,4,4,,15179,
+test_024,multi_hop,False,False,4,4,4,,13746,see assertions
+test_025,multi_hop,True,False,4,4,3,,26459,
+test_026,multi_hop,False,True,1,2,4,,17698,see assertions
+test_027,multi_hop,True,False,4,4,3,,14919,
+test_028,multi_hop,False,False,3,4,1,,16823,see assertions
+test_029,multi_hop,False,False,2,3,1,,41642,see assertions
+test_030,multi_hop,False,False,2,3,1,,60078,see assertions
+test_031,multi_hop,False,False,3,4,1,,17001,see assertions
+test_032,multi_hop,False,False,3,3,1,,30166,see assertions
+test_033,multi_turn,True,False,4,4,4,,12047,
+test_034,multi_turn,False,False,4,2,1,,1502,see assertions
+test_035,multi_turn,False,False,2,3,1,,1060,see assertions
+test_036,multi_turn,True,False,4,4,4,,9781,
+test_037,multi_turn,True,False,4,4,4,,9824,
+test_038,multi_turn,True,False,4,4,4,,10264,
+test_039,multi_turn,True,False,4,4,3,,10574,
+test_040,multi_turn,True,False,3,4,3,,6080,
+test_041,boundary,False,True,1,2,3,,11400,see assertions
+test_042,boundary,False,False,3,4,1,,2577,see assertions
+test_043,boundary,False,False,3,4,4,,9875,see assertions
+test_044,boundary,False,False,4,4,1,,2035,see assertions
+test_045,boundary,False,False,4,4,2,,26566,see assertions
+test_046,trap,False,False,4,4,1,,11001,see assertions
+test_047,trap,True,False,4,4,3,,18406,
+test_048,trap,False,True,1,2,3,,9161,see assertions
+test_049,trap,False,False,4,3,1,,2384,see assertions
+test_050,trap,False,False,,,,服务发生内部错误，请稍后重试 (code=APIError),7234,服务发生内部错误，请稍后重试 (code=APIError)
+badcase_mock_1,factual,False,False,3,4,3,,10491,see assertions
+badcase_mock_2,trap,False,False,4,4,2,,17235,see assertions
+badcase_mock_3,factual,False,True,1,1,3,,16237,see assertions
