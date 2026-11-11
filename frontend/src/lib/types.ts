@@ -11,7 +11,7 @@ export interface ChatRequest {
   provider?: string | null; 
   api_base?: string | null;
   api_key?: string | null;
-  mcp_config?: Record<string, any> | null;
+  mcp_config?: Record<string, unknown> | null; // ★ 修复：将 any 改为 unknown
 
   enable_deep_think?: boolean;
   enable_search?: boolean;
@@ -35,7 +35,6 @@ export interface DoneEvent {
   latency_ms: number;
   tokens_used: number;
   is_fallback: boolean;
-  // ★ Day 4: 后端在 done 事件中补的反馈关联字段
   message_id?: string;
   session_id?: string;
   trace_id?: string;
@@ -52,7 +51,7 @@ export type SSEEvent =
   | { type: "error"; data: ErrorEvent }
   | { type: "revise"; data: { text: string } }
   | { type: "reasoning"; data: { text: string } }
-  | { type: "heartbeat"; data: any };
+  | { type: "heartbeat"; data: unknown }; // ★ 修复：将 any 改为 unknown
 
 export interface ChatMessage {
   id: string;
@@ -64,18 +63,16 @@ export interface ChatMessage {
     latency_ms: number;
     tokens_used: number;
     is_fallback: boolean;
-    // ★ Day 4: done 事件带回来的 trace_id，供 feedback 使用
     trace_id?: string;
   };
   reasoningText?: string;
   reasoningDuration?: number;
   isThinking?: boolean;
   progressMessage?: string | null;
-  actions?: string[]; // 动作列表
-  // ★ Day 4: 反馈相关
-  message_id?: string;              // done 事件写入，feedback 的幂等键
-  feedback?: "up" | "down";         // 已提交的反馈，刷新恢复状态用
-  query?: string;                   // 对应的 user query，feedback 分析用
+  actions?: string[]; 
+  message_id?: string;              
+  feedback?: "up" | "down";         
+  query?: string;                   
 }
 
 export interface SessionInfo {

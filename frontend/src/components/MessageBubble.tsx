@@ -9,14 +9,17 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { submitFeedback } from "../lib/api";
 
-function CodeBlock({ language, code, ...props }: { language: string; code: string; [key: string]: any }) {
+// ★ 修复：替换 any 为具体的类型
+function CodeBlock({ language, code, ...props }: { language: string; code: string; [key: string]: unknown }) {
   const [isCopied, setIsCopied] = useState(false);
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(code);
       setIsCopied(true);
       setTimeout(() => setIsCopied(false), 2000);
-    } catch (err) {}
+    } catch {
+      // ★ 修复：去掉未使用的 err 变量
+    }
   };
   const handleDownload = () => {
     const blob = new Blob([code], { type: "text/plain" });
@@ -40,7 +43,7 @@ function CodeBlock({ language, code, ...props }: { language: string; code: strin
           <button onClick={handleDownload} className="flex items-center gap-1 hover:text-white transition-colors">下载</button>
         </div>
       </div>
-      <SyntaxHighlighter style={oneDark as any} language={language} PreTag="div" customStyle={{ margin: 0, padding: '1rem', background: '#282c34', fontSize: '14px' }} {...props}>
+      <SyntaxHighlighter style={oneDark as unknown as Record<string, React.CSSProperties>} language={language} PreTag="div" customStyle={{ margin: 0, padding: '1rem', background: '#282c34', fontSize: '14px' }} {...props}>
         {code}
       </SyntaxHighlighter>
     </div>
@@ -54,31 +57,29 @@ export default function MessageBubble({
 }: {
   msg: ChatMessage;
   isStreaming: boolean;
-  sessionId?: string;  // ★ Day 4: 从 ChatWindow 传入
+  sessionId?: string; 
 }) {
   const isUser = msg.role === "user";
   const [isExpanded, setIsExpanded] = useState<boolean>(msg.isThinking || false);
   const reasoningRef = useRef<HTMLDivElement>(null);
   const hasAutoFolded = useRef(false);
 
-  // ★ Day 4: 稳定的 message_id
-  // - 优先用 msg.message_id（ChatWindow 从 done 事件写入，刷新可恢复）
-  // - 否则用组件生命周期内稳定的 uuid（不刷新就 OK）
   const fallbackId = useMemo(() => {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return crypto.randomUUID();
     }
     return `m_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   }, []);
-  const messageId: string = (msg as any).message_id || (msg as any).id || fallbackId;
+  
+  // ★ 修复：移除 as any
+  const messageId: string = msg.message_id || msg.id || fallbackId;
 
-  // ★ Day 4: 反馈状态
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // 从现有已提交反馈恢复（如果 ChatWindow 传了 feedback 状态可以覆盖）
   useEffect(() => {
-    const existing = (msg as any).feedback as ("up" | "down" | undefined);
+    // ★ 修复：移除 as any
+    const existing = msg.feedback;
     if (existing) setFeedback(existing);
   }, [msg]);
 
@@ -89,16 +90,16 @@ export default function MessageBubble({
       return;
     }
     const previous = feedback;
-    setFeedback(kind);            // 乐观 UI
+    setFeedback(kind);            
     setSubmitting(true);
     try {
       const res = await submitFeedback({
         session_id: sessionId,
         message_id: messageId,
         feedback: kind,
-        query: (msg as any).query || "",
+        query: msg.query || "", // ★ 修复：移除 as any
         answer_preview: (msg.content || "").slice(0, 200),
-        trace_id: (msg.meta as any)?.trace_id || "",
+        trace_id: msg.meta?.trace_id || "", // ★ 修复：移除 as any
         user_id: (() => {
           try {
             return window.localStorage.getItem("search_agent_user_id") || "";
@@ -110,7 +111,7 @@ export default function MessageBubble({
       if (!res?.ok) throw new Error("提交失败");
     } catch (e) {
       console.error("[feedback] 提交失败", e);
-      setFeedback(previous);      // 回滚
+      setFeedback(previous);      
     } finally {
       setSubmitting(false);
     }
@@ -134,7 +135,7 @@ export default function MessageBubble({
 
   const parseContent = (text: string) => {
     let cleanText = text;
-    const charts: any[] = [];
+    const charts: Record<string, unknown>[] = []; // ★ 修复：any[] 改为 Record<string, unknown>[]
     const artifactRegex = /<artifact>([\s\S]*?)<\/artifact>/g;
     const matches = [...text.matchAll(artifactRegex)];
 
@@ -143,7 +144,8 @@ export default function MessageBubble({
         const chartConfig = JSON.parse(match[1].trim());
         charts.push(chartConfig);
         cleanText = cleanText.replace(match[0], "");
-      } catch (e) {
+      } catch {
+        // ★ 修复：去掉未使用的 e
         cleanText = cleanText.replace(match[0], "\n*(图表配置解析失败)*\n");
       }
     });
@@ -253,7 +255,8 @@ export default function MessageBubble({
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      code({ node, inline, className, children, ...props }: any) {
+                      // ★ 修复：替换 any 为具体的类型
+                      code({ inline, className, children, node: _node, ...props }: React.HTMLAttributes<HTMLElement> & { inline?: boolean; node?: unknown }) {
                         const match = /language-(\w+)/.exec(className || '');
                         const codeString = String(children).replace(/\n$/, '');
                         return !inline && match ? (
@@ -313,7 +316,6 @@ export default function MessageBubble({
                 </div>
               )}
 
-              {/* ★ Day 4: 👍 / 👎 */}
               <div className="flex items-center gap-1 ml-auto">
                 <button
                   onClick={() => handleFeedback("up")}
