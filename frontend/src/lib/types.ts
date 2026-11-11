@@ -11,7 +11,7 @@ export interface ChatRequest {
   provider?: string | null; 
   api_base?: string | null;
   api_key?: string | null;
-  mcp_config?: Record<string, unknown> | null; // ★ 修复：将 any 改为 unknown
+  mcp_config?: Record<string, unknown> | null; // ✅ 修复：将 any 改为 unknown
 
   enable_deep_think?: boolean;
   enable_search?: boolean;
@@ -51,7 +51,7 @@ export type SSEEvent =
   | { type: "error"; data: ErrorEvent }
   | { type: "revise"; data: { text: string } }
   | { type: "reasoning"; data: { text: string } }
-  | { type: "heartbeat"; data: unknown }; // ★ 修复：将 any 改为 unknown
+  | { type: "heartbeat"; data: Record<string, unknown> }; // ✅ 修复：将 any 改为 unknown
 
 export interface ChatMessage {
   id: string;
@@ -69,10 +69,10 @@ export interface ChatMessage {
   reasoningDuration?: number;
   isThinking?: boolean;
   progressMessage?: string | null;
-  actions?: string[]; 
-  message_id?: string;              
-  feedback?: "up" | "down";         
-  query?: string;                   
+  actions?: string[];
+  message_id?: string;
+  feedback?: "up" | "down";
+  query?: string;
 }
 
 export interface SessionInfo {

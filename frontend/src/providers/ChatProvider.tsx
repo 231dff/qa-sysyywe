@@ -151,7 +151,7 @@ export default function ChatProvider({
             id: `h_${i}`, role: m.role as "user" | "assistant", content: m.content,
           }));
           setMessagesMap(prev => ({ ...prev, [sid]: history }));
-        } catch (e: any) {
+        } catch { // ✅ 修复：去掉了 e: any
           setMessagesMap(prev => ({ ...prev, [sid]: [] }));
         } finally {
           setSessionsLoading(false);
@@ -164,7 +164,7 @@ export default function ChatProvider({
   const removeSession = useCallback(
     async (sid: string) => {
       if (!userId) return;
-      try { await apiDeleteSession(sid, userId); } catch (e) {} 
+      try { await apiDeleteSession(sid, userId); } catch { /* 忽略错误 */ } 
       const current = getLocalSessions().filter((s) => s.session_id !== sid);
       saveLocalSessions(current);
       setSessions(current);
@@ -218,28 +218,30 @@ export default function ChatProvider({
         [sid]: { ...DEFAULT_SSE_STATE, status: "connecting", progressMessage: "正在思考如何回答...", isThinking: true, thinkingStartTime: Date.now() }
       }));
 
-      let customConfig: any = {};
-      let customMcp: any = {};
+      // ✅ 修复：将 any 替换为 Record<string, unknown>
+      let customConfig: Record<string, unknown> = {};
+      let customMcp: Record<string, unknown> = {};
       try {
         const saved = localStorage.getItem("custom_llm_config");
         if (saved) customConfig = JSON.parse(saved);
         const savedMcp = localStorage.getItem("custom_mcp_config");
         if (savedMcp) customMcp = JSON.parse(savedMcp);
-      } catch (e) {}
+      } catch { /* 忽略错误 */ }
 
       const request: ChatRequest = {
         query: content, session_id: sid, user_id: userId,
-        model: customConfig.model || settings.model || "qwen3.8-max",
-        provider: customConfig.provider || "qwen", 
-        api_base: customConfig.apiBase || undefined,
-        api_key: customConfig.apiKey || undefined,
-        mcp_config: Object.keys(customMcp).length > 0 ? customMcp : undefined,
+        model: (customConfig.model as string) || settings.model || "qwen3.8-max",
+        provider: (customConfig.provider as string) || "qwen", 
+        api_base: (customConfig.apiBase as string) || undefined,
+        api_key: (customConfig.apiKey as string) || undefined,
+        // ✅ 修复：mcp_config 的类型强转
+        mcp_config: Object.keys(customMcp).length > 0 ? (customMcp as Record<string, unknown>) : undefined,
         search_depth: settings.searchDepth, top_k: settings.topK,
         enable_deep_think: options?.deepThink ?? false,
         enable_search: options?.webSearch ?? true,
-        fallback_model: customConfig.fallbackModel || "qwen-turbo",
-        fallback_api_base: customConfig.fallbackApiBase || undefined,
-        fallback_api_key: customConfig.fallbackApiKey || undefined,
+        fallback_model: (customConfig.fallbackModel as string) || "qwen-turbo",
+        fallback_api_base: (customConfig.fallbackApiBase as string) || undefined,
+        fallback_api_key: (customConfig.fallbackApiKey as string) || undefined,
       };
 
       const controller = new AbortController();
@@ -278,9 +280,9 @@ export default function ChatProvider({
               const dataStr = line.slice(5).trim();
               if (currentEvent && dataStr) {
                 try {
-                  const data = JSON.parse(dataStr);
+                  const data = JSON.parse(dataStr) as Record<string, unknown>;
                   handleSSEEvent(sid, currentEvent, data, setSseStateMap);
-                } catch {}
+                } catch { /* 忽略解析错误 */ }
               }
               currentEvent = "";
             }
@@ -288,11 +290,12 @@ export default function ChatProvider({
         }
 
         setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "done" } }));
-      } catch (err: any) {
-        if (err.name === "AbortError") {
+      } catch (err: unknown) { // ✅ 修复：err: any -> err: unknown
+        const error = err as Error;
+        if (error.name === "AbortError") {
           setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "aborted" } }));
         } else {
-          setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "error", error: err.message === "network error" ? "网络连接异常，请检查网络后重试。" : err.message } }));
+          setSseStateMap(prev => ({ ...prev, [sid]: { ...prev[sid], status: "error", error: error.message === "network error" ? "网络连接异常，请检查网络后重试。" : error.message } }));
         }
       } finally {
         delete abortControllers.current[sid];
@@ -314,13 +317,11 @@ export default function ChatProvider({
         doneRef.current[sid] = true;
         setMessagesMap(prev => {
           const msgs = prev[sid] || [];
-          // ★ Day 4: 从消息历史倒查最近的 user query，供 feedback 分析
           const query = _findLastUserQuery(msgs);
 
           const assistantMsg: ChatMessage = {
             id: `a_${msgCounter.current++}`, role: "assistant",
             content: sse.tokens, sources: sse.sources,
-            // ★ Day 4: meta 保留 confidence/latency/tokens 等，并带 trace_id
             meta: sse.meta ? {
               confidence: sse.meta.confidence,
               latency_ms: sse.meta.latency_ms,
@@ -330,9 +331,7 @@ export default function ChatProvider({
             } : undefined,
             reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
             actions: sse.actions,
-            // ★ Day 4: message_id 来自 done 事件，feedback 的幂等键
             message_id: sse.meta?.message_id,
-            // ★ Day 4: 关联的 user query
             query,
           };
           return { ...prev, [sid]: [...msgs, assistantMsg] };
@@ -346,13 +345,13 @@ export default function ChatProvider({
         if (sse.tokens || sse.reasoningText) {
           setMessagesMap(prev => {
             const msgs = prev[sid] || [];
-            const query = _findLastUserQuery(msgs);  // ★ Day 4
+            const query = _findLastUserQuery(msgs);  
             const abortedMsg: ChatMessage = {
               id: `a_${msgCounter.current++}`, role: "assistant",
               content: sse.tokens + "\n\n*(已停止生成)*",
               reasoningText: sse.reasoningText, reasoningDuration: sse.reasoningDuration,
               actions: sse.actions,
-              query,  // ★ Day 4
+              query,  
             };
             return { ...prev, [sid]: [...msgs, abortedMsg] };
           });
@@ -363,11 +362,11 @@ export default function ChatProvider({
         if (sid === sessionId) {
           setMessagesMap(prev => {
             const msgs = prev[sid] || [];
-            const query = _findLastUserQuery(msgs);  // ★ Day 4
+            const query = _findLastUserQuery(msgs);  
             const errorMsg: ChatMessage = { 
               id: `e_${msgCounter.current++}`, role: "assistant", 
               content: `⚠️ **系统提示**\n\n${sse.error}`,
-              query,  // ★ Day 4
+              query,  
             };
             return { ...prev, [sid]: [...msgs, errorMsg] };
           });
@@ -393,8 +392,9 @@ export default function ChatProvider({
   );
 }
 
+// ✅ 修复：将 data: any 改为 data: Record<string, unknown>
 function handleSSEEvent(
-  sid: string, eventType: string, data: any, 
+  sid: string, eventType: string, data: Record<string, unknown>, 
   setSseStateMap: React.Dispatch<React.SetStateAction<Record<string, SessionSSEState>>>
 ) {
   setSseStateMap(prev => {
@@ -403,21 +403,22 @@ function handleSSEEvent(
       case "progress": {
         const now = Date.now();
         const startTime = state.thinkingStartTime || now;
+        const msg = data.message as string; // 强转
         
-        if (data.message.includes("正在思考如何回答")) {
-           return { ...prev, [sid]: { ...state, progressMessage: data.message, isThinking: true, thinkingStartTime: startTime } };
+        if (msg.includes("正在思考如何回答")) {
+           return { ...prev, [sid]: { ...state, progressMessage: msg, isThinking: true, thinkingStartTime: startTime } };
         }
 
-        if (state.actions.includes(data.message)) return prev;
+        if (state.actions.includes(msg)) return prev;
 
         return { 
           ...prev, 
           [sid]: { 
             ...state, 
-            progressMessage: data.message, 
+            progressMessage: msg, 
             isThinking: true,
             thinkingStartTime: startTime,
-            actions: [...state.actions, data.message]
+            actions: [...state.actions, msg]
           } 
         };
       }
@@ -426,7 +427,7 @@ function handleSSEEvent(
         const startTime = state.thinkingStartTime || now;
         return { 
           ...prev, 
-          [sid]: { ...state, isThinking: true, thinkingStartTime: startTime, reasoningText: state.reasoningText + data.text } 
+          [sid]: { ...state, isThinking: true, thinkingStartTime: startTime, reasoningText: state.reasoningText + (data.text as string) } 
         };
       }
       case "token": {
@@ -438,14 +439,14 @@ function handleSSEEvent(
         }
         return { 
           ...prev, 
-          [sid]: { ...state, isThinking, reasoningDuration: duration, tokens: state.tokens + data.text, progressMessage: null } 
+          [sid]: { ...state, isThinking, reasoningDuration: duration, tokens: state.tokens + (data.text as string), progressMessage: null } 
         };
       }
       case "heartbeat": return prev;
-      case "sources": return { ...prev, [sid]: { ...state, sources: data.sources } };
-      case "done": return { ...prev, [sid]: { ...state, meta: data } };
-      case "error": return { ...prev, [sid]: { ...state, status: "error", error: data.message } };
-      case "revise": return { ...prev, [sid]: { ...state, tokens: data.text } };
+      case "sources": return { ...prev, [sid]: { ...state, sources: data.sources as SourceInfo[] } };
+      case "done": return { ...prev, [sid]: { ...state, meta: data as unknown as DoneEvent } };
+      case "error": return { ...prev, [sid]: { ...state, status: "error", error: data.message as string } };
+      case "revise": return { ...prev, [sid]: { ...state, tokens: data.text as string } };
       case "reset_tokens": return { ...prev, [sid]: { ...state, tokens: "" } };
       default: return prev;
     }
