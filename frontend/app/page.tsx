@@ -26,7 +26,7 @@ export default function Home() {
     getConfigDefaults()
       .then((cfg) => {
         setSettings({
-          model: cfg.model || "qwen3.7-plus",
+          model: cfg.default_model || "qwen3.7-plus",
           searchDepth: cfg.search_depth || "advanced",
           topK: cfg.top_k || 5,
         });
