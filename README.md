@@ -5,7 +5,7 @@ AIGC:
     ProduceID: 1219778990063427_0-data_volume/7654561358939390246-files/所有对话/主对话/qa-sysyywe/qa-sysyywe-feat-structured-index/README.md
     ReservedCode1: ""
     ContentPropagator: 001191110102MACQD9K64028705
-    PropagateID: 1219778990063427#1794557983928
+    PropagateID: 1219778990063427#1794586751412
     ReservedCode2: ""
 ---
 # 智能搜索助手
@@ -129,7 +129,7 @@ TF-IDF 余弦重排，取前 5 段
 
 ## 语义缓存
 
-Redis 存历史问答对，key 是 query 的 md5，value 里带一个 256 维字符 n-gram 哈希向量。查询时遍历所有 key 算余弦相似度，超过 0.95 就返回缓存答案。
+Redis 存历史问答对，key 是 query 的 md5，value 里带这条 query 的 1024 维向量（BGE-M3 产出，模型要提前下载，见[部署](#部署)）。查询时遍历所有 key 算余弦相似度，超过 0.95 就返回缓存答案。没有字符哈希兜底，模型必须在本地。
 
 命中后按 5 个字符一块往外吐，做出打字机效果。默认 TTL 一天，命中时续期。
 
@@ -303,7 +303,25 @@ python -m evals --judge                  # 检索质量：启用 LLM-as-judge
 
 ## 部署
 
-**Docker Compose**，四个服务：后端 + 前端 + Prometheus + Grafana。
+### 构建镜像前：先下模型
+
+语义缓存用 BGE-M3 出 1024 维向量，模型不打进镜像，构建前先拉到本地：
+
+```bash
+pip install huggingface_hub
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download BAAI/bge-m3 --local-dir ./models/bge-m3
+```
+
+`HF_ENDPOINT` 指向镜像站，直连 huggingface.co 容易超时；能直连的可以省掉这行。模型落在 `./models/bge-m3`，构建时再拷进镜像：
+
+```bash
+docker build -t qa-sysyywe:local .
+```
+
+### Docker Compose
+
+四个服务：后端 + 前端 + Prometheus + Grafana。
 
 ```bash
 docker compose up -d --build
@@ -412,12 +430,22 @@ qa-sysyywe/
 └── app.py          # Streamlit 调试界面
 ```
 
+## 已知问题
 
+写在这里，免得下次又踩：
+
+| 问题 | 影响 | 现状 |
+|---|---|---|
+| Reviewer 只有事件位，没有实现 | `server.py` 和前端都留着 `event: revise` 分支，后端从没发过这个事件 | 当初想做 Proposer-Reviewer 双阶段核查，最后落地的是 system prompt 里的置信度自检。要用得从头写 |
+| 缓存命中的 `latency_ms` 写死 10.0 | 不是实测值，上报 Langfuse 会污染延迟统计 | 未修 |
+| 语义缓存全量扫 key | 几千条以内还行，再往上延迟线性增长 | 规模上来要换 Redis Search 或向量库 |
+| k8s 里 `/app/data` 是 `emptyDir` | 多副本之间不共享，Pod 重启后知识库和图谱的 JSON 就没了 | 要持久化得换 PVC 或把存储外置 |
+| `docker-compose.yml` 引用的 `Dockerfile.backend` / `Dockerfile.frontend` 不存在 | 实际文件是 `Dockerfile` 和 `frontend/Dockerfile`，直接 `docker compose up` 会在构建阶段失败 | 先改名或改 compose 里的路径 |
+| 图谱和知识库都是进程内单例 + JSON 文件 | 没有并发写保护，多 worker 部署下别指望数据一致 | 单进程可用 |
 
 ## License
 
 MIT
 
 ---
-
 
