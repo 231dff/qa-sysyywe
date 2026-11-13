@@ -5,7 +5,7 @@ AIGC:
     ProduceID: 1219778990063427_0-data_volume/7654561358939390246-files/所有对话/主对话/qa-sysyywe/qa-sysyywe-feat-structured-index/README.md
     ReservedCode1: ""
     ContentPropagator: 001191110102MACQD9K64028705
-    PropagateID: 1219778990063427#1794556780650
+    PropagateID: 1219778990063427#1794557983928
     ReservedCode2: ""
 ---
 # 智能搜索助手
@@ -331,10 +331,67 @@ Windows 下有一键脚本 `deploy-all.ps1` / `fix-and-start.ps1`。
 
 ## 可观测性
 
-- **指标。** Prometheus 每 15 秒抓 `/api/metrics`：请求量、延迟分布、SSE 流状态、搜索成功率、token 消耗、错误计数、活跃会话、图谱规模、图检索延迟。
-- **告警。** 六条规则：错误率、延迟、服务存活、搜索失败率、token 消耗、抽取失败率。
-- **链路追踪。** OTel 埋点覆盖 FastAPI / httpx / LangChain，配了 `LANGFUSE_*` 就导出到 Langfuse，没配就自动关闭。
-- **坏例回流。** SSE 流结束时按情况往 span 上打 `reviewer_revise` / `fallback` / `error` 标签；`scripts/reflow_evals.py` 从 Langfuse 拉最近 7 天的慢请求和报错 trace，脱敏后写成 `evals/datasets/reflow_cases.jsonl`，作为回归样本。
+Prometheus + Grafana 看指标，OTel + Langfuse 看链路，`reflow_evals.py` 把线上坏例捞回测试集。
+
+### 指标监控
+
+**本地 / 单机：Docker Compose。**
+
+```bash
+docker compose up -d
+```
+
+| 入口 | 地址 | 账号 |
+|---|---|---|
+| Prometheus | http://localhost:9090 | 无 |
+| Grafana | http://localhost:3002 | `admin` / `admin` |
+
+Prometheus 每 15 秒抓一次后端的 `/api/metrics`：请求量、延迟分布、SSE 流状态、搜索成功率、token 消耗、错误计数、活跃会话、图谱规模、图检索延迟。六条告警规则覆盖错误率、延迟、服务存活、搜索失败率、token 消耗、抽取失败率。
+
+**集群：Helm。**
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install kube-prom prometheus-community/kube-prometheus-stack -n agent-platform
+```
+
+<details>
+<summary><b>取 Grafana 初始密码并转发端口</b></summary>
+
+```bash
+# 1. 读取初始密码
+kubectl get secret --namespace agent-platform kube-prom-grafana -o jsonpath="{.data.admin-password}" | base64 --decode
+
+# 2. 转发端口到本地
+kubectl port-forward -n agent-platform svc/kube-prom-grafana 3002:80
+```
+
+浏览器打开 `http://127.0.0.1:3002`，账号 `admin`，密码粘上面那串。
+
+</details>
+
+### 链路追踪
+
+OTel 埋点覆盖 FastAPI / httpx / LangChain。配三个变量就开：
+
+```bash
+LANGFUSE_PUBLIC_KEY="pk-lf-xxxxxxxx"
+LANGFUSE_SECRET_KEY="sk-lf-xxxxxxxx"
+LANGFUSE_HOST="https://cloud.langfuse.com"   # 自建版填自建地址
+```
+
+重启后端，日志里出现 `[OTel] Tracing enabled` 即生效；没配的话这条链路自动关闭，不报错。面板里能看每一轮对话的完整调用链、延迟分布和报错详情。SSE 流结束时会按情况往 span 上打 `reviewer_revise` / `fallback` / `error` 标签，方便按标签筛 bad case。
+
+### 坏例回流
+
+从 Langfuse 拉最近 7 天的慢请求和报错 trace，脱敏后写成回归样本：
+
+```bash
+python scripts/reflow_evals.py
+```
+
+输出到 `evals/datasets/reflow_cases.jsonl`。人工过一遍，把真坏例并进 `golden_dataset.jsonl`，再 `python -m evals.gate --save-baseline` 更新基线。这一圈走完，线上踩过的坑就变成下次提交要过的门禁。
 
 ## 项目结构
 
