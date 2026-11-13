@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: qa-sysyywe-podmonitor
+  namespace: agent-platform
+  labels:
+    release: kube-prom  # ★ 关键：这个标签必须和你的 Helm Release 名字一致
+spec:
+  selector:
+    matchLabels:
+      app: qa-sysyywe   # ★ 关键：这个标签必须和你业务 Pod 的标签一致
+  podMetricsEndpoints:
+    - port: http         # ★ 关键：对应你 Deployment 里容器端口的 name
+      path: /api/metrics
+      interval: 15s

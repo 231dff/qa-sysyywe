@@ -78,9 +78,10 @@ from memory.tdai_adapter import get_tdai_adapter
 from memory.feedback_store import get_feedback_store  # ★ Day 4
 from utils.helpers import generate_session_id
 from utils.http_client import set_shared_client, reset_shared_client
+# ★ 新增：导入 record_tokens, update_graph_size
 from utils.metrics import (
     record_http_request, record_sse_stream, update_active_sessions,
-    get_metrics_text, get_all_stats,
+    get_metrics_text, get_all_stats, record_tokens, update_graph_size,
 )
 from utils.semantic_cache import get_semantic_cache
 
@@ -489,6 +490,12 @@ async def chat_stream(req: ChatRequest, request: Request):
                     payload["message_id"] = message_id
                     payload["session_id"] = sid
                     payload["trace_id"] = trace_id
+                    
+                    # ★ 新增：记录 Token 消耗
+                    tokens = payload.get("tokens_used", 0)
+                    if tokens > 0:
+                        record_tokens(input_tokens=0, output_tokens=tokens)
+
                     sse_data = _sse_event("done", payload)
                 except Exception:
                     pass
@@ -708,6 +715,20 @@ async def metrics(format: Optional[str] = None):
     if format == "availability":
         from utils.metrics import get_availability_stats
         return JSONResponse(content=get_availability_stats())
+    
+    # ★ 新增：在 Prometheus 抓取前，动态更新知识图谱规模和活跃会话数
+    try:
+        from rag.graph import get_knowledge_graph
+        
+        kg = get_knowledge_graph()
+        update_graph_size(kg.count_entities(), kg.count_relations())
+        
+        # 顺便强制刷新一次活跃会话数
+        agent = get_agent()
+        update_active_sessions(len(agent._sessions))
+    except Exception as e:
+        print(f"[Metrics] 动态更新图谱规模失败: {e}")
+
     return Response(content=get_metrics_text(), media_type="text/plain; charset=utf-8")
 
 # ============================================================

@@ -7,6 +7,7 @@ import os
 os.environ["LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S"] = "0"
 
 import json
+import time  # ★ 新增：用于计算耗时
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
@@ -15,6 +16,7 @@ from tools.registry import search_and_filter_pipeline
 from tools.web_extractor import fetch_and_extract
 from utils.http_client import get_http_client
 from utils.llm_context import get_llm_context, set_llm_context
+from utils.metrics import record_search, record_graph_search  # ★ 新增：指标打点函数
 from config import get_api_config
 
 _current_user_id: ContextVar[str] = ContextVar("current_user_id", default="")
@@ -91,9 +93,18 @@ async def search(query: str, search_depth: str = "advanced", max_results: int = 
     recent.append(query)
     _recent_search_queries.set(recent)
 
-    _, fragments = await search_and_filter_pipeline(
-        query=query, search_depth=search_depth, max_results=max_results,
-    )
+    # ★ 新增：记录搜索耗时与状态
+    start_time = time.perf_counter()
+    try:
+        _, fragments = await search_and_filter_pipeline(
+            query=query, search_depth=search_depth, max_results=max_results,
+        )
+        duration = time.perf_counter() - start_time
+        record_search(provider="tavily", status="success", duration=duration)
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        record_search(provider="tavily", status="error", duration=duration)
+        raise e
 
     if not fragments:
         result = json.dumps({"summary": "（未搜索到有效结果）", "sources": []}, ensure_ascii=False)
@@ -152,7 +163,13 @@ async def graph_search(query: str, top_k: int = 5, max_hops: int = 2) -> str:
         return json.dumps({"summary": "（知识图谱不可用）", "paths": [], "sources": []}, ensure_ascii=False)
 
     idx = get_structured_index()
+    
+    # ★ 新增：记录图谱检索耗时
+    start_time = time.perf_counter()
     result = idx.search(query, top_k=min(max(top_k, 1), 10), max_hops=min(max(max_hops, 1), 3))
+    duration = time.perf_counter() - start_time
+    record_graph_search(duration)
+    
     docs = result.get("docs", [])
     paths_text = idx.kg.format_paths(result.get("paths", [])) if hasattr(idx, "kg") else ""
 
