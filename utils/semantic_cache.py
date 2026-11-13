@@ -1,27 +1,23 @@
 """
-语义缓存 (Semantic Cache)
+语义缓存 (Semantic Cache) — BGE-M3 Embedding 版本
 
-★ DeepSeek 式 L1/L2 分层：
-- L1 精确匹配：query md5 → Redis Hash，O(1)
-- L2 语义相似：Redis Search KNN 向量索引（HNSW + COSINE），避免 KEYS 全量扫
-- 降级：Redis Search 不可用时，用 SCAN 游标分批遍历 + 逐条余弦
-- user_id 隔离：key 带 user_key 前缀，FT.SEARCH 用 TAG 过滤
-- user_id 为空跳过读写（匿名不入缓存，避免跨用户泄露）
+将原本基于 Hash 特征的向量化替换为 BGE-M3 稠密语义向量。
+底层 Redis Search HNSW 索引逻辑不变，仅调整向量生成方式与索引维度。
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import struct
 import time
 from typing import Optional
 
 import redis
+from sentence_transformers import SentenceTransformer
 
 from config import get_agent_config
 
-# ── Redis Search 可选依赖（redis-py 5.x 内置） ──
+# ── Redis Search 可选依赖 ──
 try:
     from redis.commands.search.field import TagField, VectorField, TextField
     from redis.commands.search.indexDefinition import IndexDefinition, IndexType
@@ -30,24 +26,10 @@ try:
 except ImportError:
     _HAS_REDIS_SEARCH = False
 
-_VECTOR_DIM = 256
+# ── BGE-M3 配置 ──
+_BGE_MODEL_NAME = "/app/models/bge-m3"         # 或使用国内镜像 "lkhapple/BGE-M3"
+_VECTOR_DIM = 1024                        # BGE-M3 稠密向量维度[reference:5]
 _INDEX_NAME = "semantic_cache_idx"
-
-
-def _hash_features(text: str, dim: int = _VECTOR_DIM) -> list[float]:
-    vec = [0.0] * dim
-    text = text.lower()
-    for gram_len in (1, 2):
-        for i in range(len(text) - gram_len + 1):
-            gram = text[i : i + gram_len]
-            h = int(hashlib.sha256(gram.encode("utf-8")).hexdigest()[:8], 16)
-            vec[h % dim] += 1.0
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
 
 
 def _safe_user_key(user_id: str) -> str:
@@ -71,13 +53,28 @@ class SemanticCache:
             port=cfg.redis_port,
             db=cfg.redis_db,
             password=cfg.redis_password or None,
-            decode_responses=False,          # vector 是 bytes，必须 False
+            decode_responses=False,
             socket_connect_timeout=2,
             socket_timeout=2,
         )
         self._prefix = "semantic_cache:"
         self._ttl = ttl_seconds
+
+        # ★ 加载 BGE-M3 模型（首次调用会下载，约 2.3 GB）
+        print(f"[SemanticCache] 正在加载 Embedding 模型: {_BGE_MODEL_NAME} ...")
+        self._embedder = SentenceTransformer(_BGE_MODEL_NAME)
+        print(f"[SemanticCache] Embedding 模型加载完成 (维度={_VECTOR_DIM})")
+
         self._has_index = self._ensure_index()
+
+    # ---------- 向量生成（替代原 _hash_features）----------
+    def _embed(self, text: str) -> list[float]:
+        """
+        使用 BGE-M3 生成稠密语义向量。
+        sentence-transformers 默认会做 L2 归一化，余弦相似度可直接用点积计算。
+        """
+        vec = self._embedder.encode(text, normalize_embeddings=True)
+        return vec.tolist()
 
     # ---------- 索引 ----------
     def _ensure_index(self) -> bool:
@@ -100,7 +97,7 @@ class SemanticCache:
             )
             definition = IndexDefinition(prefix=[self._prefix], index_type=IndexType.HASH)
             self._client.ft(_INDEX_NAME).create_index(schema, definition=definition)
-            print(f"[SemanticCache] Redis Search 索引已创建: {_INDEX_NAME}")
+            print(f"[SemanticCache] Redis Search 索引已创建: {_INDEX_NAME} (DIM={_VECTOR_DIM})")
             return True
         except Exception as e:
             print(f"[SemanticCache] 索引创建失败，降级为 SCAN 模式: {e}")
@@ -111,12 +108,12 @@ class SemanticCache:
         self,
         query: str,
         user_id: Optional[str] = None,
-        threshold: float = 0.95,
+        threshold: float = 0.90,       # BGE-M3 语义向量建议阈值 0.85~0.90
     ) -> Optional[tuple[str, list]]:
         if not user_id:
             return None
         user_key = _safe_user_key(user_id)
-        target_vec = _hash_features(query)
+        target_vec = self._embed(query)   # ★ 使用 BGE-M3 生成查询向量
         if self._has_index:
             return self._get_via_search(user_key, target_vec, threshold)
         return self._get_via_scan(user_key, target_vec, threshold)
@@ -139,9 +136,13 @@ class SemanticCache:
             return None
         doc = result.docs[0]
         try:
-            distance = float(getattr(doc, "knn_score", 1.0))
+            knn_score_raw = getattr(doc, "knn_score", "1.0")
+            if isinstance(knn_score_raw, bytes):
+                knn_score_raw = knn_score_raw.decode("utf-8")
+            distance = float(knn_score_raw)
         except (TypeError, ValueError):
             distance = 1.0
+
         similarity = 1.0 - distance
         if similarity < threshold:
             return None
@@ -168,6 +169,7 @@ class SemanticCache:
         return (answer or "", sources)
 
     def _get_via_scan(self, user_key, target_vec, threshold):
+        # 降级路径同样使用 BGE-M3 向量
         best = None
         best_sim = -1.0
         cursor = 0
@@ -186,7 +188,8 @@ class SemanticCache:
                         vec = _bytes_to_vec(data[b"vector"])
                     except Exception:
                         continue
-                    sim = _cosine(target_vec, vec)
+                    # 余弦相似度
+                    sim = sum(x * y for x, y in zip(target_vec, vec))
                     if sim > best_sim:
                         best_sim = sim
                         best = (key, data)
@@ -230,7 +233,7 @@ class SemanticCache:
             return
         try:
             user_key = _safe_user_key(user_id)
-            vec = _hash_features(query)
+            vec = self._embed(query)          # ★ 使用 BGE-M3 生成写入向量
             key = f"{self._prefix}{user_key}:{hashlib.md5(query.encode()).hexdigest()}"
 
             mapping = {

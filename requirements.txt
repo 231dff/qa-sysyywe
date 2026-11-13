@@ -59,3 +59,5 @@ langfuse>=2.59.7
 # ———— 网页提取 & 重排 ————
 trafilatura==2.0.0
 scikit-learn==1.6.1
+
+sentence-transformers>=2.7.0

@@ -6,12 +6,12 @@ metadata:
   labels:
     app: qa-sysyywe
 spec:
-  replicas: 3                          # ← 改：单副本 → 3 副本
+  replicas: 1                          # ★ 改回 1 副本，避免本地内存被模型撑爆
   strategy:
-    type: RollingUpdate                # ← 改：Recreate → RollingUpdate
+    type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1                      # 更新时最多多起 1 个 Pod
-      maxUnavailable: 0                # 更新时保证 0 个 Pod 不可用
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: qa-sysyywe
@@ -55,25 +55,40 @@ spec:
               value: "redis.agent-platform.svc.cluster.local"
             - name: REDIS_PORT
               value: "6379"
+            - name: HF_ENDPOINT
+              value: "https://hf-mirror.com"  # 确保模型下载走国内镜像
           resources:
             requests:
-              cpu: "300m"
+              cpu: "200m"
               memory: "512Mi"
             limits:
-              cpu: "1500m"
-              memory: "2Gi"
+              cpu: "2"
+              memory: "6Gi"                   # ★ 提升到 6Gi，防止模型加载时 OOMKilled
+          
+          # ★ 新增：启动探针。允许模型下载/加载最长 5 分钟（30 * 10s）
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 10
+            
+          # 存活探针：startupProbe 成功后才开始生效
           livenessProbe:
             httpGet:
               path: /api/health
               port: 8000
-            initialDelaySeconds: 20
             periodSeconds: 30
+            failureThreshold: 3
+            
+          # 就绪探针：startupProbe 成功后才开始生效
           readinessProbe:
             httpGet:
               path: /api/health
               port: 8000
-            initialDelaySeconds: 10
             periodSeconds: 15
+            failureThreshold: 3
+
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -85,7 +100,7 @@ spec:
               mountPath: /tmp
       volumes:
         - name: data
-          emptyDir: {}                 # ← 改：PVC → emptyDir（多副本兼容）
+          emptyDir: {}
         - name: tmp
           emptyDir: {}
 ---

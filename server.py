@@ -78,7 +78,7 @@ from memory.tdai_adapter import get_tdai_adapter
 from memory.feedback_store import get_feedback_store  # ★ Day 4
 from utils.helpers import generate_session_id
 from utils.http_client import set_shared_client, reset_shared_client
-# ★ 新增：导入 record_tokens, update_graph_size
+# ★ 导入 record_tokens, update_graph_size
 from utils.metrics import (
     record_http_request, record_sse_stream, update_active_sessions,
     get_metrics_text, get_all_stats, record_tokens, update_graph_size,
@@ -213,6 +213,14 @@ async def startup():
         print(f"[Startup] FeedbackStore 已初始化 (backend={backend})")
     except Exception as e:
         print(f"[Startup] FeedbackStore 初始化失败: {e}")
+
+    # ★★★ 核心新增：在启动阶段强制预热 SemanticCache ★★★
+    try:
+        print("[Startup] 正在预热 SemanticCache（加载 BGE-M3 模型中，此过程可能会阻塞几秒）...")
+        get_semantic_cache()
+        print("[Startup] SemanticCache 预热完成！")
+    except Exception as e:
+        print(f"[Startup] SemanticCache 预热失败: {e}")
 
     _cleanup_task = asyncio.create_task(_session_cleanup_loop())
     print(f"[SessionCleanup] 后台清理任务已启动，间隔 {_SESSION_CLEANUP_INTERVAL}s")

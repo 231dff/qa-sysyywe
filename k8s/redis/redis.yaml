@@ -30,18 +30,15 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7-alpine
+          # ★ 必须使用 redis-stack-server 镜像
+          image: redis/redis-stack-server:7.2.0-v10
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 6379
-          args:
-            - redis-server
-            - --appendonly
-            - "yes"
-            - --maxmemory
-            - "400mb"
-            - --maxmemory-policy
-            - "allkeys-lru"
+          env:
+            - name: REDIS_ARGS
+              # 配置内存和淘汰策略 (替代原来的 args)
+              value: "--appendonly yes --maxmemory 400mb --maxmemory-policy allkeys-lru"
           resources:
             requests:
               cpu: "100m"

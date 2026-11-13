@@ -11,3 +11,8 @@ evals/
 .git/
 .gitignore
 *.md
+# 忽略大模型文件
+*.gguf
+*.bin
+*.safetensors
+models/
